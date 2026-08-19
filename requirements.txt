@@ -1,4 +1,3 @@
-"""  
 Sales Ops · Data Quality Suite — Singapore  
 Delivery Hero / Pandora · Digital Sales APAC
 
