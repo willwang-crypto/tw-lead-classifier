@@ -40,7 +40,7 @@ if not check_password():
     st.stop()
 
 # ═════════════════════════════════════════════════════════════════
-# 2. MARKET CONFIG & LOCALIZATION (TAIWAN)
+# 2. HELPER FUNCTIONS & LARGE FILE LOADERS
 # ═════════════════════════════════════════════════════════════════
 MARKETS = {
     "TW": {
@@ -52,6 +52,27 @@ MARKETS = {
 
 _DEFAULT_EXCLUSION_KW = ["hotel", "supermarket", "convenience store"]
 TW_POSTAL_RE = re.compile(r'\b\d{3,5}\b')
+
+def safe_load_large_csv(uploaded_file):
+    """專為 Salesforce 匯出大檔設計的高效能 CSV 解析器 (支援 40萬+ 筆資料)"""
+    if uploaded_file.name.endswith(".csv"):
+        for encoding in ['utf-8-sig', 'utf-8', 'cp950', 'latin-1']:
+            try:
+                uploaded_file.seek(0)
+                return pd.read_csv(
+                    uploaded_file,
+                    encoding=encoding,
+                    low_memory=False,
+                    on_bad_lines='skip',
+                    engine='c',
+                    quoting=1
+                )
+            except Exception:
+                continue
+        uploaded_file.seek(0)
+        return pd.read_csv(uploaded_file, low_memory=False, on_bad_lines='skip')
+    else:
+        return pd.read_excel(uploaded_file)
 
 def haversine_distance(lat1, lon1, lat2, lon2) -> float:
     """計算兩點經緯度之間的真實距離（公尺 Meters）"""
@@ -66,7 +87,7 @@ def haversine_distance(lat1, lon1, lat2, lon2) -> float:
         return 999999.0
 
 def find_column(df, possible_names):
-    """彈性偵測欄位名稱"""
+    """彈性偵測欄位名稱 (含 Coordinates (Latitude/Longitude))"""
     for col in df.columns:
         col_clean = str(col).strip().lower()
         for target in possible_names:
@@ -161,7 +182,7 @@ def main():
 
         if uploaded_url_file is not None:
             try:
-                df_url = pd.read_csv(uploaded_url_file) if uploaded_url_file.name.endswith(".csv") else pd.read_excel(uploaded_url_file)
+                df_url = safe_load_large_csv(uploaded_url_file)
                 st.success(f"Successfully loaded {len(df_url)} rows.")
 
                 name_col = find_column(df_url, ["company / account", "company", "account", "account name", "title"])
@@ -208,7 +229,7 @@ def main():
         st.caption("定期清理 Salesforce 內部已有資料，利用經緯度抓出重複建檔的帳號。")
         st.file_uploader("Upload Salesforce Master", type=["xlsx","xls","csv"], key="audit_up")
 
-    # ── TAB 4: CRM CHECK (完整排查版) ──────────────────────────────
+    # ── TAB 4: CRM CHECK (防崩潰大數據比對版) ──────────────────────
     with tab4:
         st.subheader("🔍 Quick CRM Duplicate Check")
         st.caption("針對一般的餐廳名單進行 CRM 快速重複排查（無需 GRID 或 Apify 爬蟲）。")
@@ -221,8 +242,8 @@ def main():
 
         if raw_list_up and crm_accounts_up:
             try:
-                df_raw = pd.read_csv(raw_list_up) if raw_list_up.name.endswith(".csv") else pd.read_excel(raw_list_up)
-                df_crm = pd.read_csv(crm_accounts_up) if crm_accounts_up.name.endswith(".csv") else pd.read_excel(crm_accounts_up)
+                df_raw = safe_load_large_csv(raw_list_up)
+                df_crm = safe_load_large_csv(crm_accounts_up)
 
                 st.success(f"✅ 檔案載入成功：Raw 名單 ({len(df_raw)} 筆) | CRM Accounts ({len(df_crm)} 筆)")
 
@@ -233,17 +254,22 @@ def main():
                     st.error("❌ 找不到餐廳名稱欄位，請檢查檔案標頭是否含有 Name, Account, Company 等字樣。")
                 else:
                     if st.button("▶ 開始 CRM 快速比對", type="primary", use_container_width=True):
-                        with st.spinner("比對中，請稍候..."):
-                            crm_names = df_crm[crm_name_col].astype(str).str.lower().tolist()
-                            
+                        with st.spinner("42 萬筆資料高速比對中，請稍候..."):
+                            crm_series = df_crm[crm_name_col].fillna("").astype(str).str.strip().str.lower()
+                            crm_names = set(crm_series[crm_series != ""].tolist())
+
                             def check_dup(raw_name):
+                                if pd.isna(raw_name) or not str(raw_name).strip():
+                                    return "Unverified", "", 0
                                 raw_str = str(raw_name).lower().strip()
+                                
+                                if raw_str in crm_names:
+                                    return "P4 - Duplicate", raw_str, 100.0
+                                
                                 for c_name in crm_names:
-                                    ratio = SequenceMatcher(None, raw_str, c_name).ratio()
-                                    if ratio >= 0.75:
-                                        return "P4 - Duplicate", c_name, round(ratio * 100, 1)
-                                    elif ratio >= 0.50:
-                                        return "P3 - Potential Match", c_name, round(ratio * 100, 1)
+                                    if len(raw_str) > 3 and (raw_str in c_name or c_name in raw_str):
+                                        return "P3 - Potential Match", c_name, 80.0
+                                        
                                 return "Unverified", "", 0
 
                             results = df_raw[raw_name_col].apply(check_dup)
