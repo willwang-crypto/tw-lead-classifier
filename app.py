@@ -50,24 +50,8 @@ MARKETS = {
     }
 }
 
-ACTIVE_PIPELINE = [
-    "active", "new", "collecting documents", "negotiation",
-    "menu processing", "onboarding", "quality check",
-]
-WIN_BACK        = ["lost", "terminated"]
-WIN_BACK_FAILED = ["win back failed"]
-
-FOOD_DELIVERY_ALLOWED = {
-    "Restaurant","Fine dining restaurant","Family restaurant","Casual dining restaurant",
-    "Buffet restaurant","Bistro","Eatery","Pizza restaurant","Sushi restaurant",
-}
 _DEFAULT_EXCLUSION_KW = ["hotel", "supermarket", "convenience store"]
-
-TW_UNIT_RE   = re.compile(r'(\d+|[bB]\d+)\s*(樓|[fF])', re.IGNORECASE)
-TW_POSTAL_RE = re.compile(r'\b\d{3,5}\b')  # 修復：完整支援 3~5 位數台灣郵編
-TW_NAME_NOISE= re.compile(r'\b(股份有限公司|有限公司|企業社|工作室|商行|行|獨資|台灣|TW|taiwan)\b', re.IGNORECASE)
-
-_NA_VALUES   = {"","nan","none","n/a","na","nil","-","–","unknown","no name"}
+TW_POSTAL_RE = re.compile(r'\b\d{3,5}\b')
 
 def haversine_distance(lat1, lon1, lat2, lon2) -> float:
     """計算兩點經緯度之間的真實距離（公尺 Meters）"""
@@ -77,12 +61,12 @@ def haversine_distance(lat1, lon1, lat2, lon2) -> float:
         dlon = lon2 - lon1
         a = math.sin(dlat / 2)**2 + math.cos(lat1) * math.sin(lat2) * math.sin(dlon / 2)**2
         c = 2 * math.asin(math.sqrt(a))
-        return c * 6371000  # 地球平均半徑（公尺）
+        return c * 6371000
     except Exception:
         return 999999.0
 
 def find_column(df, possible_names):
-    """彈性偵測欄位名稱 (包含 Coordinates (Latitude/Longitude))"""
+    """彈性偵測欄位名稱"""
     for col in df.columns:
         col_clean = str(col).strip().lower()
         for target in possible_names:
@@ -123,19 +107,17 @@ def main():
         
         st.divider()
         st.subheader("📍 距離與相似度設定")
-        max_dist_p4 = st.slider("P4 完全重複最大距離 (公尺)", 10, 100, 50, 5, help="距離小於此值且店名高度相似 → 判定為 P4 Duplicate")
-        max_dist_p3 = st.slider("P3 潛在重複最大距離 (公尺)", 50, 300, 100, 10, help="距離小於此值且店名中度相似 → 判定為 P3 Potential")
+        max_dist_p4 = st.slider("P4 完全重複最大距離 (公尺)", 10, 100, 50, 5)
+        max_dist_p3 = st.slider("P3 潛在重複最大距離 (公尺)", 50, 300, 100, 10)
         p3_name_thresh = st.slider("店名相似度門檻 (%)", 50, 95, 70, 5)
 
         st.divider()
         st.subheader("🚫 排除關鍵字 Exclusions")
         kw_input = st.text_area("排除類別關鍵字", value="\n".join(_DEFAULT_EXCLUSION_KW), height=120)
 
-    # 頁面主標題
     st.title("Sales Ops · Data Quality Suite — Taiwan (Geo-Distance Version)")
     st.caption("foodpanda / Delivery Hero · Digital Sales APAC")
 
-    # 還原 6 個完整的 Tab
     tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
         "📊 Classify Leads",
         "🔗 Generate Apify URLs",
@@ -163,7 +145,7 @@ def main():
             if st.button("▶ 開始分類比對 (Run Classification)", type="primary", use_container_width=True):
                 st.info("系統正透過經緯度 Haversine 距離演算法比對中...")
 
-    # ── TAB 2: GENERATE APIFY URLS (完全修復版) ───────────────────
+    # ── TAB 2: GENERATE APIFY URLS ────────────────────────────────
     with tab2:
         st.subheader("🔗 Generate Google Maps URLs for Apify")
         st.markdown("#### Step 1 · Generate URLs")
@@ -182,7 +164,6 @@ def main():
                 df_url = pd.read_csv(uploaded_url_file) if uploaded_url_file.name.endswith(".csv") else pd.read_excel(uploaded_url_file)
                 st.success(f"Successfully loaded {len(df_url)} rows.")
 
-                # 精準模糊比對包含 Coordinates (Latitude) 括號的欄位
                 name_col = find_column(df_url, ["company / account", "company", "account", "account name", "title"])
                 street_col = find_column(df_url, ["street", "address"])
                 postal_col = find_column(df_url, ["zip/postal code", "zip", "postal", "postal code"])
@@ -227,11 +208,61 @@ def main():
         st.caption("定期清理 Salesforce 內部已有資料，利用經緯度抓出重複建檔的帳號。")
         st.file_uploader("Upload Salesforce Master", type=["xlsx","xls","csv"], key="audit_up")
 
-    # ── TAB 4: CRM CHECK ──────────────────────────────────────────
+    # ── TAB 4: CRM CHECK (完整排查版) ──────────────────────────────
     with tab4:
         st.subheader("🔍 Quick CRM Duplicate Check")
-        st.caption("針對一般的餐廳名單進行 CRM 快速重複排查（不需要 GRID 或 Apify）。")
-        st.file_uploader("Upload Restaurant List", type=["xlsx","xls","csv"], key="crm_chk_rest")
+        st.caption("針對一般的餐廳名單進行 CRM 快速重複排查（無需 GRID 或 Apify 爬蟲）。")
+
+        col_c1, col_c2 = st.columns(2)
+        with col_c1:
+            raw_list_up = st.file_uploader("1. 上傳 Raw 餐廳名單 (.xlsx/.csv)", type=["xlsx","xls","csv"], key="tab4_raw")
+        with col_c2:
+            crm_accounts_up = st.file_uploader("2. 上傳 CRM All Accounts (.xlsx/.csv)", type=["xlsx","xls","csv"], key="tab4_crm")
+
+        if raw_list_up and crm_accounts_up:
+            try:
+                df_raw = pd.read_csv(raw_list_up) if raw_list_up.name.endswith(".csv") else pd.read_excel(raw_list_up)
+                df_crm = pd.read_csv(crm_accounts_up) if crm_accounts_up.name.endswith(".csv") else pd.read_excel(crm_accounts_up)
+
+                st.success(f"✅ 檔案載入成功：Raw 名單 ({len(df_raw)} 筆) | CRM Accounts ({len(df_crm)} 筆)")
+
+                raw_name_col = find_column(df_raw, ["account name", "company", "account", "name", "title"])
+                crm_name_col = find_column(df_crm, ["account name", "company", "account", "name", "title"])
+
+                if not raw_name_col or not crm_name_col:
+                    st.error("❌ 找不到餐廳名稱欄位，請檢查檔案標頭是否含有 Name, Account, Company 等字樣。")
+                else:
+                    if st.button("▶ 開始 CRM 快速比對", type="primary", use_container_width=True):
+                        with st.spinner("比對中，請稍候..."):
+                            crm_names = df_crm[crm_name_col].astype(str).str.lower().tolist()
+                            
+                            def check_dup(raw_name):
+                                raw_str = str(raw_name).lower().strip()
+                                for c_name in crm_names:
+                                    ratio = SequenceMatcher(None, raw_str, c_name).ratio()
+                                    if ratio >= 0.75:
+                                        return "P4 - Duplicate", c_name, round(ratio * 100, 1)
+                                    elif ratio >= 0.50:
+                                        return "P3 - Potential Match", c_name, round(ratio * 100, 1)
+                                return "Unverified", "", 0
+
+                            results = df_raw[raw_name_col].apply(check_dup)
+                            df_raw["CRM Status"] = [r[0] for r in results]
+                            df_raw["Matched CRM Name"] = [r[1] for r in results]
+                            df_raw["Similarity Score (%)"] = [r[2] for r in results]
+
+                            st.write("### 比對結果預覽")
+                            st.dataframe(df_raw.head(20))
+
+                            csv_out = df_raw.to_csv(index=False).encode('utf-8-sig')
+                            st.download_button(
+                                label="📥 下載 CRM 排查結果 CSV",
+                                data=csv_out,
+                                file_name="crm_check_result.csv",
+                                mime="text/csv"
+                            )
+            except Exception as e:
+                st.error(f"處理檔案時發生錯誤: {str(e)}")
 
     # ── TAB 5: KPI SAMPLE CHECKER ─────────────────────────────────
     with tab5:
