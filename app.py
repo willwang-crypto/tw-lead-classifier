@@ -1,7 +1,7 @@
 import pandas as pd
 import streamlit as st
 from difflib import SequenceMatcher
-from urllib.parse import quote
+from urllib.parse import quote, unquote
 import re
 
 # 1. 密碼驗證
@@ -25,7 +25,6 @@ if not check_password():
     st.stop()
 
 # ── 根據 Apify Google 類別劃分非目標 (WTG) ─────────────────────
-# 包含非餐飲、製造商、器具店、景點，以及純伴手禮/糕餅店
 WTG_GOOGLE_CATEGORIES = [
     "烘焙用具店", "旅遊景點", "製造商", "茶葉店", "花店", "超級市場", 
     "便利商店", "生鮮超市", "雜貨店", "服飾店", "禮品店", "藥局", "五金行", 
@@ -68,10 +67,10 @@ tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
     "🔍 CRM Check", "📋 KPI Sample Checker", "📖 How to Use"
 ])
 
-# ── TAB 1: CLASSIFY LEADS (基於 Apify Google 類別精準分類) ──────────
+# ── TAB 1: CLASSIFY LEADS (含店名跨列自動搜尋對齊引擎) ──────────────
 with tab1:
-    st.subheader("📊 Classify Leads (Apify Google 類別判定引擎)")
-    st.caption("直接抓取 Google Maps 官方類別判定 WTG，並對照 CRM 進行重複比對。")
+    st.subheader("📊 Classify Leads (Apify Google 類別與亂序自動對齊引擎)")
+    st.caption("自動克服順序不對問題，透過店名與搜尋字串自動搜尋對齊 Google 官方類別。")
 
     c1, c2, c3 = st.columns(3)
     with c1:
@@ -84,7 +83,7 @@ with tab1:
     if leads_up and apify_up and crm_up:
         st.success("✅ 3 個檔案皆已載入，點擊下方按鈕進行最終分類。")
         if st.button("▶ 開始分類比對 (Run Classification)", type="primary", use_container_width=True):
-            with st.spinner("讀取 Google 類別與 CRM 比對中..."):
+            with st.spinner("自動執行跨列店名搜尋與 Google 類別驗證中..."):
                 try:
                     df_leads = safe_load_csv(leads_up)
                     df_apify = safe_load_csv(apify_up)
@@ -93,10 +92,10 @@ with tab1:
                     # 1. 捕捉 Leads 欄位
                     l_name_col = find_column(df_leads, ["company / account", "company", "account", "name", "title"])
                     l_addr_col = find_column(df_leads, ["street", "address", "地址"])
-                    l_grid_col = find_column(df_leads, ["grid", "id", "account id", "lead id"])
 
                     # 2. 捕捉 Apify 欄位
-                    a_grid_col = find_column(df_apify, ["grid", "id"])
+                    a_name_col = find_column(df_apify, ["title", "name", "searchstring"])
+                    a_search_col = find_column(df_apify, ["searchstring", "inputstarturl", "url"])
                     a_cat_col = find_column(df_apify, ["categoryname", "categories/0", "primarycategory", "category"])
                     a_status_col = find_column(df_apify, ["permanentlyclosed", "temporarilyclosed", "isclosed", "status"])
 
@@ -104,22 +103,27 @@ with tab1:
                     c_name_col = find_column(df_crm, ["account name", "company", "account", "name", "title"])
                     c_addr_col = find_column(df_crm, ["street", "address", "地址"])
 
-                    # 建立 Apify 查表字典
-                    apify_dict = {}
-                    for idx, a_row in df_apify.iterrows():
-                        g_id = str(a_row[a_grid_col]).strip() if a_grid_col and pd.notna(a_row[a_grid_col]) else f"INDEX_{idx}"
-                        cat = str(a_row[a_cat_col]).strip() if a_cat_col and pd.notna(a_row[a_cat_col]) else ""
-                        is_closed = str(a_row[a_status_col]) if a_status_col and pd.notna(a_row[a_status_col]) else "False"
-                        
-                        apify_dict[g_id] = {"category": cat, "is_closed": is_closed}
-                        apify_dict[f"INDEX_{idx}"] = {"category": cat, "is_closed": is_closed}
-
                     # 預處理 CRM 清單
                     crm_pairs = []
                     if c_name_col and c_addr_col:
                         c_names = [clean_text(x) for x in df_crm[c_name_col].fillna("")]
                         c_addrs = [clean_text(x) for x in df_crm[c_addr_col].fillna("")]
                         crm_pairs = list(zip(c_names, c_addrs))
+
+                    # 預處理 Apify 結果清單，以便進行跨列模糊搜尋
+                    apify_records = []
+                    for _, a_row in df_apify.iterrows():
+                        a_title = clean_text(a_row[a_name_col]) if a_name_col and pd.notna(a_row[a_name_col]) else ""
+                        a_search = unquote(str(a_row[a_search_col])).lower() if a_search_col and pd.notna(a_row[a_search_col]) else ""
+                        cat = str(a_row[a_cat_col]).strip() if a_cat_col and pd.notna(a_row[a_cat_col]) else ""
+                        is_closed = str(a_row[a_status_col]) if a_status_col and pd.notna(a_row[a_status_col]) else "False"
+                        
+                        apify_records.append({
+                            "title": a_title,
+                            "search": a_search,
+                            "cat": cat,
+                            "is_closed": is_closed
+                        })
 
                     final_statuses = []
                     matched_crm_names = []
@@ -129,14 +133,28 @@ with tab1:
                     for idx, l_row in df_leads.iterrows():
                         l_name_raw = str(l_row[l_name_col]).strip() if l_name_col and pd.notna(l_row[l_name_col]) else ""
                         l_addr_raw = str(l_row[l_addr_col]).strip() if l_addr_col and pd.notna(l_row[l_addr_col]) else ""
-                        l_grid = str(l_row[l_grid_col]).strip() if l_grid_col and pd.notna(l_row[l_grid_col]) else f"INDEX_{idx}"
 
                         l_name = clean_text(l_name_raw)
                         l_addr = clean_text(l_addr_raw)
 
-                        apify_info = apify_dict.get(l_grid, apify_dict.get(f"INDEX_{idx}", {}))
-                        cat_str = apify_info.get("category", "")
-                        is_closed_str = str(apify_info.get("is_closed", "")).lower()
+                        # 在 Apify 紀錄中搜尋最匹配的該間店（突破順序不一問題）
+                        best_apify_match = None
+                        best_score = 0.0
+
+                        for a_rec in apify_records:
+                            # 1. 優先比對搜尋字串 (URL / SearchString)
+                            if l_name and l_name in a_rec["search"]:
+                                best_apify_match = a_rec
+                                break
+                            # 2. 次要比對標題名稱相似度
+                            if l_name and a_rec["title"]:
+                                score = SequenceMatcher(None, l_name, a_rec["title"]).ratio()
+                                if score > best_score and score >= 0.50:
+                                    best_score = score
+                                    best_apify_match = a_rec
+
+                        cat_str = best_apify_match["cat"] if best_apify_match else ""
+                        is_closed_str = str(best_apify_match["is_closed"]).lower() if best_apify_match else "false"
 
                         google_cats.append(cat_str)
 
@@ -147,7 +165,7 @@ with tab1:
                             debug_reasons.append("Google 地圖標示歇業")
                             continue
 
-                        # 2. 直接根據 Google 官方 Category 判定 WTG
+                        # 2. 判定 WTG (Wrong Target Group)
                         if cat_str in WTG_GOOGLE_CATEGORIES or any(w in cat_str for w in ["超市", "便利商店", "烘焙用具", "景點", "製造商"]):
                             final_statuses.append("Wrong Target Group (WTG)")
                             matched_crm_names.append("")
@@ -157,7 +175,7 @@ with tab1:
                         # 3. CRM 重複比對
                         best_status = "P1 - New Lead"
                         best_crm_name = ""
-                        debug_msg = f"合格餐飲Lead (Google類別: {cat_str})"
+                        debug_msg = f"驗證通過 (Google類別: {cat_str or '未對應到'})"
 
                         if l_name:
                             prefix = l_name[:2]
@@ -305,7 +323,7 @@ with tab4:
             if not raw_name_col or not crm_name_col:
                 st.error("❌ 找不到餐廳名稱欄位，請檢查標頭。")
             elif not raw_addr_col or not crm_addr_col:
-                st.error("❌ 找不到地址欄位，請檢查標头。")
+                st.error("❌ 找不到地址欄位，請檢查標頭。")
             else:
                 if st.button("▶ 開始 CRM 比對 (純地址版)", type="primary"):
                     with st.spinner("比對中..."):
