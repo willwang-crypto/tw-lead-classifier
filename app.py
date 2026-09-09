@@ -25,18 +25,21 @@ def check_password():
 if not check_password():
     st.stop()
 
-# 生鮮雜貨與非餐飲排除關鍵字
-GROCERY_KEYWORDS = [
-    "超市", "生鮮", "全聯", "家樂福", "聖德科斯", "水果行", "水果", 
-    "肉品", "雜貨", "雜貨店", "便利商店", "超商", "7-11", "711", "全家", 
-    "萊爾富", "ok超商", "美廉社", "有機", "農場", "水產", "Mart", "Grocery", 
-    "Supermarket", "Convenience Store", "Market", "gift shop", "wedding store", "禮品"
+# 僅針對無爭議的「純零售/超商門市」進行硬攔截
+PURE_RETAIL_CHAINS = [
+    "7-11", "711", "全家便利商店", "萊爾富", "ok超商", "美廉社", 
+    "全聯福利中心", "家樂福量販", "家樂福便利購", "大潤發", "愛買", "聖德科斯"
 ]
 
-def is_grocery(name_str):
+def is_pure_grocery(name_str):
     if not name_str or pd.isna(name_str): return False
-    name_lower = str(name_str).lower()
-    return any(kw.lower() in name_lower for kw in GROCERY_KEYWORDS)
+    name_clean = str(name_str).strip().lower()
+    
+    # 只有當店名完全等於超商名，或是極純粹的零售店時才攔截
+    for chain in PURE_RETAIL_CHAINS:
+        if name_clean == chain.lower() or name_clean.startswith(chain.lower()):
+            return True
+    return False
 
 def haversine_distance(lat1, lon1, lat2, lon2) -> float:
     try:
@@ -79,7 +82,7 @@ tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
     "🔍 CRM Check", "📋 KPI Sample Checker", "📖 How to Use"
 ])
 
-# ── TAB 1: CLASSIFY LEADS (7 頁籤完整分類引擎) ────────────────────
+# ── TAB 1: CLASSIFY LEADS ─────────────────────────────────────────
 with tab1:
     st.subheader("📊 Classify Leads (經緯度距離與 Google 分類引擎)")
     st.caption("結合經緯度 Haversine 距離與 Apify 抓取的 Google Maps 主類別進行最終判定。")
@@ -101,7 +104,6 @@ with tab1:
                     df_apify = safe_load_csv(apify_up)
                     df_crm = safe_load_csv(crm_up)
 
-                    # 欄位自動對應
                     l_name_col = find_column(df_leads, ["company / account", "company", "account", "name", "title"])
                     l_lat_col = find_column(df_leads, ["latitude", "lat", "coordinates (lat"])
                     l_lng_col = find_column(df_leads, ["longitude", "lng", "long", "coordinates (long"])
@@ -115,7 +117,6 @@ with tab1:
                     c_lat_col = find_column(df_crm, ["latitude", "lat"])
                     c_lng_col = find_column(df_crm, ["longitude", "lng", "long"])
 
-                    # 建立 Apify 查表字典
                     apify_dict = {}
                     if a_grid_col and len(df_apify) > 0:
                         for _, a_row in df_apify.iterrows():
@@ -124,12 +125,10 @@ with tab1:
                             is_closed = str(a_row[a_status_col]) if a_status_col and pd.notna(a_row[a_status_col]) else "False"
                             apify_dict[g_id] = {"category": cat, "is_closed": is_closed}
 
-                    # 分類主邏輯
                     final_statuses = []
                     matched_crm_names = []
                     matched_dists = []
 
-                    # 預處理 CRM 經緯度列表
                     crm_records = []
                     if c_name_col and c_lat_col and c_lng_col:
                         for _, c_row in df_crm.iterrows():
@@ -146,7 +145,6 @@ with tab1:
                         l_name = str(l_row[l_name_col]).strip() if l_name_col and pd.notna(l_row[l_name_col]) else ""
                         l_grid = str(l_row[l_grid_col]).strip() if l_grid_col and pd.notna(l_row[l_grid_col]) else f"GRID_{idx}"
 
-                        # 1. 檢查 Google 爬蟲類別與狀態
                         apify_info = apify_dict.get(l_grid, {})
                         cat_str = apify_info.get("category", "")
                         is_closed_str = apify_info.get("is_closed", "False")
@@ -157,13 +155,13 @@ with tab1:
                             matched_dists.append(0)
                             continue
 
-                        if is_grocery(l_name) or is_grocery(cat_str):
+                        # 真正根據 Google Maps 主類別精準判讀非餐飲目標
+                        if any(g_kw in cat_str.lower() for g_kw in ["supermarket", "convenience store", "grocery store"]):
                             final_statuses.append("Wrong Target Group (WTG)")
                             matched_crm_names.append("")
                             matched_dists.append(0)
                             continue
 
-                        # 2. 經緯度距離二次比對
                         best_status = "P1 - New Lead"
                         best_crm_name = ""
                         min_dist = 999999.0
@@ -290,7 +288,7 @@ with tab2:
 # ── TAB 4: CRM CHECK ─────────────────────────────────────────────
 with tab4:
     st.subheader("🔍 Quick CRM Duplicate Check")
-    st.caption("自動排除生鮮雜貨/非餐廳店家 + 店名地址雙重比對。")
+    st.caption("自動排除純零售超商 + 店名地址雙重比對。")
 
     col1, col2 = st.columns(2)
     with col1:
@@ -315,8 +313,8 @@ with tab4:
             elif not raw_addr_col or not crm_addr_col:
                 st.error("❌ 找不到地址欄位，請檢查標頭。")
             else:
-                if st.button("▶ 開始 CRM 比對 (含生鮮雜貨過濾)", type="primary"):
-                    with st.spinner("排查生鮮雜貨與比對中..."):
+                if st.button("▶ 開始 CRM 比對 (保守安全過濾)", type="primary"):
+                    with st.spinner("比對中..."):
                         crm_names = df_crm[crm_name_col].fillna("").astype(str).str.strip().str.lower().tolist()
                         crm_addrs = df_crm[crm_addr_col].fillna("").astype(str).str.strip().str.lower().tolist()
                         crm_pairs = list(zip(crm_names, crm_addrs))
@@ -328,7 +326,8 @@ with tab4:
                             if not r_name:
                                 return "Unverified", "", 0.0
 
-                            if is_grocery(r_name):
+                            # 只硬攔截極度明確的純超商/連鎖門市
+                            if is_pure_grocery(r_name):
                                 return "Wrong Target Group (Grocery)", "", 0.0
 
                             prefix = r_name[:2]
@@ -355,7 +354,7 @@ with tab4:
                         p4_count = (df_raw["CRM Status"] == "P4 - Duplicate").sum()
                         unv_count = (df_raw["CRM Status"] == "Unverified").sum()
 
-                        st.write(f"### 📊 排查結果摘要：Unverified 新餐飲店 ({unv_count} 筆) | P4 重複 ({p4_count} 筆) | 🚫 生鮮雜貨過濾 ({wtg_count} 筆)")
+                        st.write(f"### 📊 排查結果摘要：Unverified 新餐飲店 ({unv_count} 筆) | P4 重複 ({p4_count} 筆) | 🚫 生鮮超商硬過濾 ({wtg_count} 筆)")
                         st.dataframe(df_raw.head(20))
 
                         csv_out = df_raw.to_csv(index=False).encode('utf-8-sig')
