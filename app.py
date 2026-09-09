@@ -24,25 +24,19 @@ def check_password():
 if not check_password():
     st.stop()
 
-# 僅硬攔截無爭議的純超商門市
-PURE_RETAIL_CHAINS = [
-    "7-11", "711", "全家便利商店", "萊爾富", "ok超商", "美廉社", 
-    "全聯福利中心", "家樂福量販", "家樂福便利購", "大潤發", "愛買", "聖德科斯"
+# ── 根據 Apify Google 類別劃分非目標 (WTG) ─────────────────────
+# 包含非餐飲、製造商、器具店、景點，以及純伴手禮/糕餅店
+WTG_GOOGLE_CATEGORIES = [
+    "烘焙用具店", "旅遊景點", "製造商", "茶葉店", "花店", "超級市場", 
+    "便利商店", "生鮮超市", "雜貨店", "服飾店", "禮品店", "藥局", "五金行", 
+    "用品店", "餅店", "朱古力店", "中式糕餅店", "糖果糕餅店"
 ]
 
 def clean_text(text):
-    """基本文字清洗：轉小寫、統一台/臺、刪除多餘空格"""
     if not text or pd.isna(text): return ""
     t = str(text).strip().lower()
     t = t.replace("臺", "台").replace("1樓", "").replace("一樓", "")
     return t
-
-def is_pure_grocery(name_str):
-    name_clean = clean_text(name_str)
-    for chain in PURE_RETAIL_CHAINS:
-        if name_clean == chain.lower() or name_clean.startswith(chain.lower()):
-            return True
-    return False
 
 def safe_load_csv(uploaded_file):
     if uploaded_file.name.endswith(".csv"):
@@ -74,10 +68,10 @@ tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
     "🔍 CRM Check", "📋 KPI Sample Checker", "📖 How to Use"
 ])
 
-# ── TAB 1: CLASSIFY LEADS (含欄位診斷與簡繁體對齊版) ────────────────
+# ── TAB 1: CLASSIFY LEADS (基於 Apify Google 類別精準分類) ──────────
 with tab1:
-    st.subheader("📊 Classify Leads (店名地址 + Google 類別雙重驗證引擎)")
-    st.caption("透過店名與地址模糊比對，搭配 Apify 的 Google Maps 主類別進行最終判定。")
+    st.subheader("📊 Classify Leads (Apify Google 類別判定引擎)")
+    st.caption("直接抓取 Google Maps 官方類別判定 WTG，並對照 CRM 進行重複比對。")
 
     c1, c2, c3 = st.columns(3)
     with c1:
@@ -90,7 +84,7 @@ with tab1:
     if leads_up and apify_up and crm_up:
         st.success("✅ 3 個檔案皆已載入，點擊下方按鈕進行最終分類。")
         if st.button("▶ 開始分類比對 (Run Classification)", type="primary", use_container_width=True):
-            with st.spinner("整合數據並執行店名、地址與 Google 類別驗證中..."):
+            with st.spinner("讀取 Google 類別與 CRM 比對中..."):
                 try:
                     df_leads = safe_load_csv(leads_up)
                     df_apify = safe_load_csv(apify_up)
@@ -101,23 +95,20 @@ with tab1:
                     l_addr_col = find_column(df_leads, ["street", "address", "地址"])
                     l_grid_col = find_column(df_leads, ["grid", "id", "account id", "lead id"])
 
-                    # 2. 捕捉 Apify 欄位（放大辨識範圍）
+                    # 2. 捕捉 Apify 欄位
                     a_grid_col = find_column(df_apify, ["grid", "id"])
-                    a_cat_col = find_column(df_apify, ["categoryname", "categories/0", "primarycategory", "categories", "category", "subTitle"])
+                    a_cat_col = find_column(df_apify, ["categoryname", "categories/0", "primarycategory", "category"])
                     a_status_col = find_column(df_apify, ["permanentlyclosed", "temporarilyclosed", "isclosed", "status"])
 
                     # 3. 捕捉 CRM 欄位
                     c_name_col = find_column(df_crm, ["account name", "company", "account", "name", "title"])
                     c_addr_col = find_column(df_crm, ["street", "address", "地址"])
 
-                    # 顯示欄位診斷資訊，方便排查
-                    st.info(f"💡 欄位對應狀態：\n- Leads 店名/地址：`{l_name_col}` / `{l_addr_col}`\n- Apify 類別/歇業：`{a_cat_col}` / `{a_status_col}`\n- CRM 店名/地址：`{c_name_col}` / `{c_addr_col}`")
-
                     # 建立 Apify 查表字典
                     apify_dict = {}
                     for idx, a_row in df_apify.iterrows():
                         g_id = str(a_row[a_grid_col]).strip() if a_grid_col and pd.notna(a_row[a_grid_col]) else f"INDEX_{idx}"
-                        cat = str(a_row[a_cat_col]) if a_cat_col and pd.notna(a_row[a_cat_col]) else ""
+                        cat = str(a_row[a_cat_col]).strip() if a_cat_col and pd.notna(a_row[a_cat_col]) else ""
                         is_closed = str(a_row[a_status_col]) if a_status_col and pd.notna(a_row[a_status_col]) else "False"
                         
                         apify_dict[g_id] = {"category": cat, "is_closed": is_closed}
@@ -132,6 +123,7 @@ with tab1:
 
                     final_statuses = []
                     matched_crm_names = []
+                    google_cats = []
                     debug_reasons = []
 
                     for idx, l_row in df_leads.iterrows():
@@ -143,49 +135,45 @@ with tab1:
                         l_addr = clean_text(l_addr_raw)
 
                         apify_info = apify_dict.get(l_grid, apify_dict.get(f"INDEX_{idx}", {}))
-                        cat_str = apify_info.get("category", "").lower()
+                        cat_str = apify_info.get("category", "")
                         is_closed_str = str(apify_info.get("is_closed", "")).lower()
+
+                        google_cats.append(cat_str)
 
                         # 1. 判定歇業
                         if "true" in is_closed_str or "closed" in is_closed_str or "1" == is_closed_str:
                             final_statuses.append("Permanently Closed")
                             matched_crm_names.append("")
-                            debug_reasons.append("Google 地圖顯示歇業")
+                            debug_reasons.append("Google 地圖標示歇業")
                             continue
 
-                        # 2. 判定非餐飲目標 (Google 主類別)
-                        grocery_tags = ["supermarket", "convenience store", "grocery store", "gift shop", "wedding store", "便利商店", "超市", "禮品店"]
-                        if any(g_kw in cat_str for g_kw in grocery_tags):
+                        # 2. 直接根據 Google 官方 Category 判定 WTG
+                        if cat_str in WTG_GOOGLE_CATEGORIES or any(w in cat_str for w in ["超市", "便利商店", "烘焙用具", "景點", "製造商"]):
                             final_statuses.append("Wrong Target Group (WTG)")
                             matched_crm_names.append("")
-                            debug_reasons.append(f"Google 類別屬於非餐飲 ({cat_str})")
+                            debug_reasons.append(f"Google 類別為 [{cat_str}] (非目標)")
                             continue
 
-                        # 3. CRM 地址與店名雙重模糊比對
+                        # 3. CRM 重複比對
                         best_status = "P1 - New Lead"
                         best_crm_name = ""
-                        debug_msg = "CRM 未發現對應紀錄"
+                        debug_msg = f"合格餐飲Lead (Google類別: {cat_str})"
 
                         if l_name:
                             prefix = l_name[:2]
                             for c_name, c_addr in crm_pairs:
-                                # 允許字首前 2 字相同，或是主要名稱包含
                                 if not (c_name.startswith(prefix) or prefix in c_name):
                                     continue
                                 
                                 name_score = SequenceMatcher(None, l_name, c_name).ratio()
-                                # 店名相似度門檻降至 60% (提升捕獲率)
                                 if name_score >= 0.60:
                                     addr_score = SequenceMatcher(None, l_addr, c_addr).ratio() if (l_addr and c_addr) else 0.0
-                                    
-                                    # 門牌數字與路名互相包含判讀
                                     addr_contains = (l_addr in c_addr or c_addr in l_addr) if len(l_addr) > 4 and len(c_addr) > 4 else False
 
-                                    # 店名相同 + (地址模糊相似 OR 門牌號路名包含)
                                     if addr_score >= 0.50 or addr_contains:
                                         best_status = "P4 - Duplicate"
                                         best_crm_name = c_name
-                                        debug_msg = f"命中 CRM ({c_name})"
+                                        debug_msg = f"命中 CRM 重複檔 ({c_name})"
                                         break
 
                         final_statuses.append(best_status)
@@ -193,6 +181,7 @@ with tab1:
                         debug_reasons.append(debug_msg)
 
                     df_leads["Final Classification"] = final_statuses
+                    df_leads["Google Category"] = google_cats
                     df_leads["Matched CRM Name"] = matched_crm_names
                     df_leads["判定依據說明"] = debug_reasons
 
@@ -200,7 +189,7 @@ with tab1:
                     st.write("### 📊 最終分類統計結果：")
                     st.write(counts)
 
-                    st.dataframe(df_leads[["Final Classification", l_name_col, "Matched CRM Name", "判定依據說明"]].head(30))
+                    st.dataframe(df_leads[["Final Classification", l_name_col, "Google Category", "Matched CRM Name", "判定依據說明"]].head(30))
 
                     csv_out = df_leads.to_csv(index=False).encode('utf-8-sig')
                     st.download_button("📥 下載最終分類報告 (CSV)", data=csv_out, file_name="final_leads_classified.csv", mime="text/csv")
@@ -316,7 +305,7 @@ with tab4:
             if not raw_name_col or not crm_name_col:
                 st.error("❌ 找不到餐廳名稱欄位，請檢查標頭。")
             elif not raw_addr_col or not crm_addr_col:
-                st.error("❌ 找不到地址欄位，請檢查標頭。")
+                st.error("❌ 找不到地址欄位，請檢查標头。")
             else:
                 if st.button("▶ 開始 CRM 比對 (純地址版)", type="primary"):
                     with st.spinner("比對中..."):
@@ -333,9 +322,6 @@ with tab4:
 
                             if not r_name:
                                 return "Unverified", "", 0.0
-
-                            if is_pure_grocery(r_name):
-                                return "Wrong Target Group (Grocery)", "", 0.0
 
                             prefix = r_name[:2]
                             for c_name, c_addr in crm_pairs:
@@ -357,11 +343,10 @@ with tab4:
                         df_raw["Matched CRM Name"] = [r[1] for r in results]
                         df_raw["Similarity Score (%)"] = [r[2] for r in results]
 
-                        wtg_count = (df_raw["CRM Status"] == "Wrong Target Group (Grocery)").sum()
                         p4_count = (df_raw["CRM Status"] == "P4 - Duplicate").sum()
                         unv_count = (df_raw["CRM Status"] == "Unverified").sum()
 
-                        st.write(f"### 📊 排查結果摘要：Unverified 新餐飲店 ({unv_count} 筆) | P4 重複 ({p4_count} 筆) | 🚫 生鮮超商硬過濾 ({wtg_count} 筆)")
+                        st.write(f"### 📊 排查結果摘要：Unverified 新餐飲店 ({unv_count} 筆) | P4 重複 ({p4_count} 筆)")
                         st.dataframe(df_raw.head(20))
 
                         csv_out = df_raw.to_csv(index=False).encode('utf-8-sig')
