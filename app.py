@@ -52,6 +52,7 @@ MARKETS = {
 
 _DEFAULT_EXCLUSION_KW = ["hotel", "supermarket", "convenience store"]
 TW_POSTAL_RE = re.compile(r'\b\d{3,5}\b')
+ROAD_NUM_RE = re.compile(r'([\u4e00-\u9fff]{2,4}[路街道巷弄])|(\d+[號樓fF])')
 
 def safe_load_large_csv(uploaded_file):
     """專為 Salesforce 匯出大檔設計的高效能 CSV 解析器"""
@@ -108,6 +109,14 @@ def generate_google_maps_url(row, url_format, name_col, street_col, postal_col, 
         street = str(row[street_col]).strip() if street_col and pd.notna(row[street_col]) else ""
         postal = extract_tw_postal(row[postal_col]) if postal_col and pd.notna(row[postal_col]) else ""
         return f"https://www.google.com/maps/search/{quote(f'{company_name} {street} {postal}'.strip())}"
+
+def extract_road_number(address_str):
+    """提取地址中的關鍵特徵（路名 + 號碼），作為超級快取 Key"""
+    if not address_str or pd.isna(address_str):
+        return ""
+    matches = ROAD_NUM_RE.findall(str(address_str))
+    flat_matches = [m for sub in matches for m in sub if m]
+    return "".join(flat_matches[:2]) if flat_matches else ""
 
 # ═════════════════════════════════════════════════════════════════
 # 3. MAIN STREAMLIT INTERFACE & SIDEBAR
@@ -227,10 +236,10 @@ def main():
         st.caption("定期清理 Salesforce 內部已有資料，利用經緯度抓出重複建檔的帳號。")
         st.file_uploader("Upload Salesforce Master", type=["xlsx","xls","csv"], key="audit_up")
 
-    # ── TAB 4: CRM CHECK (店名 + 地址雙重精準比對版) ───────────────────
+    # ── TAB 4: CRM CHECK (大數據秒級 + 店名地址雙重比對版) ─────────
     with tab4:
         st.subheader("🔍 Quick CRM Duplicate Check")
-        st.caption("針對一般的餐廳名單進行 CRM 快速重複排查（需同時通過店名與地址比對，不同地址之分店一律歸為 Unverified）。")
+        st.caption("針對一般的餐廳名單進行 CRM 快速重複排查（店名相似 + 同地址/同路段門牌驗證；不同地址之分店直接視為 Unverified）。")
 
         col_c1, col_c2 = st.columns(2)
         with col_c1:
@@ -252,50 +261,54 @@ def main():
                 crm_addr_col = find_column(df_crm, ["street", "address", "地址", "formatted restaurant address"])
 
                 if not raw_name_col or not crm_name_col:
-                    st.error("❌ 找不到餐廳名稱欄位，請檢查檔案標頭是否含有 Name, Account, Company 等字樣。")
+                    st.error("❌ 找不到餐廳名稱欄位，請檢查檔案標頭。")
                 elif not raw_addr_col or not crm_addr_col:
-                    st.error("❌ 找不到地址欄位，請檢查檔案標頭是否含有 Address, Street, 地址 等字樣。")
+                    st.error("❌ 找不到地址欄位，請檢查檔案標頭。")
                 else:
-                    if st.button("▶ 開始 CRM 精準比對 (店名 + 地址)", type="primary", use_container_width=True):
-                        with st.spinner("進行店名與地址雙重比對中..."):
-                            df_crm['clean_name'] = df_crm[crm_name_col].fillna("").astype(str).str.strip().str.lower()
-                            df_crm['clean_addr'] = df_crm[crm_addr_col].fillna("").astype(str).str.strip().str.lower()
-                            
-                            valid_crm_df = df_crm[(df_crm['clean_name'] != "")].copy()
+                    if st.button("▶ 開始 CRM 秒級精準比對", type="primary", use_container_width=True):
+                        with st.spinner("建立 42 萬筆 CRM 地址與店名高速 Hash 索引中..."):
+                            # 1. 前處理 CRM 資料
+                            df_crm['c_name'] = df_crm[crm_name_col].fillna("").astype(str).str.strip().str.lower()
+                            df_crm['c_addr'] = df_crm[crm_addr_col].fillna("").astype(str).str.strip().str.lower()
+                            df_crm['addr_key'] = df_crm['c_addr'].apply(extract_road_number)
 
-                            def check_dup_with_address(row):
-                                raw_name = str(row[raw_name_col]).lower().strip() if pd.notna(row[raw_name_col]) else ""
-                                raw_addr = str(row[raw_addr_col]).lower().strip() if pd.notna(row[raw_addr_col]) else ""
+                            # 2. 建立【地址關鍵字 -> CRM 資料清單】快取字典 (雜湊比對，比對次數降低 99.9%)
+                            addr_map = {}
+                            for _, r in df_crm[df_crm['c_name'] != ""].iterrows():
+                                key = r['addr_key']
+                                if key:
+                                    if key not in addr_map:
+                                        addr_map[key] = []
+                                    addr_map[key].append((r['c_name'], r['c_addr']))
 
-                                if not raw_name:
+                            def check_dup_fast(row):
+                                r_name = str(row[raw_name_col]).lower().strip() if pd.notna(row[raw_name_col]) else ""
+                                r_addr = str(row[raw_addr_col]).lower().strip() if pd.notna(row[raw_addr_col]) else ""
+                                r_key = extract_road_number(r_addr)
+
+                                if not r_name:
                                     return "Unverified", "", 0.0
 
-                                for _, crm_row in valid_crm_df.iterrows():
-                                    c_name = crm_row['clean_name']
-                                    c_addr = crm_row['clean_addr']
+                                # 只去撈取【路名門牌關鍵字相同的 CRM 候選店家】
+                                candidates = addr_map.get(r_key, [])
+                                
+                                for c_name, c_addr in candidates:
+                                    name_score = SequenceMatcher(None, r_name, c_name).ratio()
+                                    
+                                    # 如果店名相似度 >= 70%
+                                    if name_score >= 0.70:
+                                        addr_score = SequenceMatcher(None, r_addr, c_addr).ratio()
+                                        addr_contains = (r_addr in c_addr or c_addr in r_addr) if len(r_addr) > 5 and len(c_addr) > 5 else False
 
-                                    # 1. 計算店名相似度
-                                    name_ratio = SequenceMatcher(None, raw_name, c_name).ratio()
+                                        # 店名相同 + (地址高相似 OR 地址彼此包含) -> 判定為完全重複 (P4)
+                                        if addr_score >= 0.60 or addr_contains:
+                                            final_pct = round(((name_score + max(addr_score, 0.8)) / 2) * 100, 1)
+                                            return "P4 - Duplicate", c_name, final_pct
 
-                                    # 如果店名高度相似 (>= 70%)
-                                    if name_ratio >= 0.70:
-                                        # 2. 計算地址相似度
-                                        addr_ratio = SequenceMatcher(None, raw_addr, c_addr).ratio() if (raw_addr and c_addr) else 0.0
-                                        
-                                        # 特殊比對：包含主要路名號碼
-                                        addr_contains = (raw_addr in c_addr or c_addr in raw_addr) if len(raw_addr) > 5 and len(c_addr) > 5 else False
-
-                                        # 【店名相同】且【地址也相同/高相似(>=65%)】，才認定為重複 (P4)
-                                        if addr_ratio >= 0.65 or addr_contains:
-                                            total_score = round(((name_ratio + max(addr_ratio, 0.8)) / 2) * 100, 1)
-                                            return "P4 - Duplicate", c_name, total_score
-                                        else:
-                                            # 店名相同，但【地址不同】 -> 認定為不同分店，跳過並判定為 Unverified！
-                                            continue
-
+                                # 同店名但地址門牌不同（分店），不在 candidates 內命中 -> 直接放行判定為 Unverified (新分店)！
                                 return "Unverified", "", 0.0
 
-                            results = df_raw.apply(check_dup_with_address, axis=1)
+                            results = df_raw.apply(check_dup_fast, axis=1)
                             df_raw["CRM Status"] = [r[0] for r in results]
                             df_raw["Matched CRM Name"] = [r[1] for r in results]
                             df_raw["Similarity Score (%)"] = [r[2] for r in results]
@@ -307,7 +320,7 @@ def main():
                             st.download_button(
                                 label="📥 下載 CRM 排查結果 CSV",
                                 data=csv_out,
-                                file_name="crm_check_result_address.csv",
+                                file_name="crm_check_result_fast.csv",
                                 mime="text/csv"
                             )
             except Exception as e:
