@@ -25,7 +25,7 @@ def check_password():
 if not check_password():
     st.stop()
 
-# 僅針對無爭議的「純零售/超商門市」進行硬攔截
+# 僅硬攔截無爭議的純超商門市
 PURE_RETAIL_CHAINS = [
     "7-11", "711", "全家便利商店", "萊爾富", "ok超商", "美廉社", 
     "全聯福利中心", "家樂福量販", "家樂福便利購", "大潤發", "愛買", "聖德科斯"
@@ -34,8 +34,6 @@ PURE_RETAIL_CHAINS = [
 def is_pure_grocery(name_str):
     if not name_str or pd.isna(name_str): return False
     name_clean = str(name_str).strip().lower()
-    
-    # 只有當店名完全等於超商名，或是極純粹的零售店時才攔截
     for chain in PURE_RETAIL_CHAINS:
         if name_clean == chain.lower() or name_clean.startswith(chain.lower()):
             return True
@@ -91,7 +89,7 @@ with tab1:
     with c1:
         leads_up = st.file_uploader("1. 上傳 Unverified Leads 檔", type=["xlsx","xls","csv"], key="t1_leads")
     with c2:
-        apify_up = st.file_uploader("2. 上傳含 GRID 的 Apify 結果", type=["xlsx","xls","csv"], key="t1_apify")
+        apify_up = st.file_uploader("2. 上傳 Apify 結果檔 (含/不含 GRID 皆可)", type=["xlsx","xls","csv"], key="t1_apify")
     with c3:
         crm_up = st.file_uploader("3. 上傳 CRM All Accounts 大檔", type=["xlsx","xls","csv"], key="t1_crm")
 
@@ -104,87 +102,105 @@ with tab1:
                     df_apify = safe_load_csv(apify_up)
                     df_crm = safe_load_csv(crm_up)
 
+                    # 1. 捕捉 Leads 欄位
                     l_name_col = find_column(df_leads, ["company / account", "company", "account", "name", "title"])
-                    l_lat_col = find_column(df_leads, ["latitude", "lat", "coordinates (lat"])
-                    l_lng_col = find_column(df_leads, ["longitude", "lng", "long", "coordinates (long"])
+                    l_lat_col = find_column(df_leads, ["latitude", "lat", "coordinates (lat", "y"])
+                    l_lng_col = find_column(df_leads, ["longitude", "lng", "long", "coordinates (long", "x"])
                     l_grid_col = find_column(df_leads, ["grid", "id", "account id", "lead id"])
 
+                    # 2. 捕捉 Apify 欄位
                     a_grid_col = find_column(df_apify, ["grid", "id"])
-                    a_cat_col = find_column(df_apify, ["categoryname", "categories", "primarycategory", "category"])
+                    a_cat_col = find_column(df_apify, ["categoryname", "categories/0", "primarycategory", "categories", "category"])
                     a_status_col = find_column(df_apify, ["permanentlyclosed", "temporarilyclosed", "isclosed", "status"])
 
-                    c_name_col = find_column(df_crm, ["account name", "company", "account", "name"])
-                    c_lat_col = find_column(df_crm, ["latitude", "lat"])
-                    c_lng_col = find_column(df_crm, ["longitude", "lng", "long"])
+                    # 3. 捕捉 CRM 欄位
+                    c_name_col = find_column(df_crm, ["account name", "company", "account", "name", "title"])
+                    c_lat_col = find_column(df_crm, ["latitude", "lat", "y"])
+                    c_lng_col = find_column(df_crm, ["longitude", "lng", "long", "x"])
 
+                    # 提示訊息
+                    warnings = []
+                    if not l_lat_col or not l_lng_col: warnings.append("Leads 檔缺經緯度 (Lat/Lng)")
+                    if not c_lat_col or not c_lng_col: warnings.append("CRM 檔缺經緯度 (Lat/Lng)")
+                    if not a_cat_col: warnings.append("Apify 檔缺類別欄位 (Category)")
+                    if warnings:
+                        st.warning(f"⚠️ 標頭提醒：{', '.join(warnings)}")
+
+                    # 建立 Apify 查表字典（支援 GRID 對接或按順序對接）
                     apify_dict = {}
-                    if a_grid_col and len(df_apify) > 0:
-                        for _, a_row in df_apify.iterrows():
-                            g_id = str(a_row[a_grid_col]).strip()
-                            cat = str(a_row[a_cat_col]) if a_cat_col and pd.notna(a_row[a_cat_col]) else ""
-                            is_closed = str(a_row[a_status_col]) if a_status_col and pd.notna(a_row[a_status_col]) else "False"
-                            apify_dict[g_id] = {"category": cat, "is_closed": is_closed}
+                    for idx, a_row in df_apify.iterrows():
+                        g_id = str(a_row[a_grid_col]).strip() if a_grid_col and pd.notna(a_row[a_grid_col]) else f"INDEX_{idx}"
+                        cat = str(a_row[a_cat_col]) if a_cat_col and pd.notna(a_row[a_cat_col]) else ""
+                        is_closed = str(a_row[a_status_col]) if a_status_col and pd.notna(a_row[a_status_col]) else "False"
+                        
+                        apify_dict[g_id] = {"category": cat, "is_closed": is_closed}
+                        apify_dict[f"INDEX_{idx}"] = {"category": cat, "is_closed": is_closed}
 
                     final_statuses = []
                     matched_crm_names = []
                     matched_dists = []
 
+                    # 預處理 CRM 經緯度
                     crm_records = []
                     if c_name_col and c_lat_col and c_lng_col:
                         for _, c_row in df_crm.iterrows():
                             try:
-                                crm_records.append((
-                                    str(c_row[c_name_col]).lower().strip(),
-                                    float(c_row[c_lat_col]),
-                                    float(c_row[c_lng_col])
-                                ))
+                                if pd.notna(c_row[c_lat_col]) and pd.notna(c_row[c_lng_col]):
+                                    crm_records.append((
+                                        str(c_row[c_name_col]).lower().strip(),
+                                        float(c_row[c_lat_col]),
+                                        float(c_row[c_lng_col])
+                                    ))
                             except Exception:
                                 continue
 
                     for idx, l_row in df_leads.iterrows():
                         l_name = str(l_row[l_name_col]).strip() if l_name_col and pd.notna(l_row[l_name_col]) else ""
-                        l_grid = str(l_row[l_grid_col]).strip() if l_grid_col and pd.notna(l_row[l_grid_col]) else f"GRID_{idx}"
+                        l_grid = str(l_row[l_grid_col]).strip() if l_grid_col and pd.notna(l_row[l_grid_col]) else f"INDEX_{idx}"
 
-                        apify_info = apify_dict.get(l_grid, {})
+                        apify_info = apify_dict.get(l_grid, apify_dict.get(f"INDEX_{idx}", {}))
                         cat_str = apify_info.get("category", "")
                         is_closed_str = apify_info.get("is_closed", "False")
 
+                        # 1. 判定歇業
                         if "true" in is_closed_str.lower() or "closed" in is_closed_str.lower():
                             final_statuses.append("Permanently Closed")
                             matched_crm_names.append("")
                             matched_dists.append(0)
                             continue
 
-                        # 真正根據 Google Maps 主類別精準判讀非餐飲目標
-                        if any(g_kw in cat_str.lower() for g_kw in ["supermarket", "convenience store", "grocery store"]):
+                        # 2. 判定非餐飲目標 (Google 主類別)
+                        if any(g_kw in cat_str.lower() for g_kw in ["supermarket", "convenience store", "grocery store", "gift shop", "wedding store"]):
                             final_statuses.append("Wrong Target Group (WTG)")
                             matched_crm_names.append("")
                             matched_dists.append(0)
                             continue
 
+                        # 3. 經緯度 Haversine 距離比對
                         best_status = "P1 - New Lead"
                         best_crm_name = ""
                         min_dist = 999999.0
 
-                        try:
-                            l_lat = float(l_row[l_lat_col])
-                            l_lng = float(l_row[l_lng_col])
+                        if l_lat_col and l_lng_col and pd.notna(l_row[l_lat_col]) and pd.notna(l_row[l_lng_col]):
+                            try:
+                                l_lat = float(l_row[l_lat_col])
+                                l_lng = float(l_row[l_lng_col])
 
-                            for c_name, c_lat, c_lng in crm_records:
-                                dist = haversine_distance(l_lat, l_lng, c_lat, c_lng)
-                                if dist < min_dist:
-                                    min_dist = dist
-                                    name_ratio = SequenceMatcher(None, l_name.lower(), c_name).ratio()
-                                    
-                                    if dist <= 50 and name_ratio >= 0.65:
-                                        best_status = "P4 - Duplicate"
-                                        best_crm_name = c_name
-                                        break
-                                    elif dist <= 100 and name_ratio >= 0.50:
-                                        best_status = "P3 - Potential Match"
-                                        best_crm_name = c_name
-                        except Exception:
-                            pass
+                                for c_name, c_lat, c_lng in crm_records:
+                                    dist = haversine_distance(l_lat, l_lng, c_lat, c_lng)
+                                    if dist < min_dist:
+                                        min_dist = dist
+                                        name_ratio = SequenceMatcher(None, l_name.lower(), c_name).ratio()
+                                        
+                                        if dist <= 50 and name_ratio >= 0.65:
+                                            best_status = "P4 - Duplicate"
+                                            best_crm_name = c_name
+                                            break
+                                        elif dist <= 100 and name_ratio >= 0.50:
+                                            best_status = "P3 - Potential Match"
+                                            best_crm_name = c_name
+                            except Exception:
+                                pass
 
                         final_statuses.append(best_status)
                         matched_crm_names.append(best_crm_name)
@@ -194,7 +210,10 @@ with tab1:
                     df_leads["Matched CRM Name"] = matched_crm_names
                     df_leads["Min Distance (m)"] = matched_dists
 
-                    st.write("### 📊 分類結果預覽")
+                    counts = df_leads["Final Classification"].value_counts().to_dict()
+                    st.write("### 📊 最終分類統計：")
+                    st.write(counts)
+
                     st.dataframe(df_leads.head(20))
 
                     csv_out = df_leads.to_csv(index=False).encode('utf-8-sig')
@@ -326,7 +345,6 @@ with tab4:
                             if not r_name:
                                 return "Unverified", "", 0.0
 
-                            # 只硬攔截極度明確的純超商/連鎖門市
                             if is_pure_grocery(r_name):
                                 return "Wrong Target Group (Grocery)", "", 0.0
 
