@@ -24,15 +24,21 @@ def check_password():
 if not check_password():
     st.stop()
 
-# 僅硬攔截無爭議的純超商/零售門市
+# 僅硬攔截無爭議的純超商門市
 PURE_RETAIL_CHAINS = [
     "7-11", "711", "全家便利商店", "萊爾富", "ok超商", "美廉社", 
     "全聯福利中心", "家樂福量販", "家樂福便利購", "大潤發", "愛買", "聖德科斯"
 ]
 
+def clean_text(text):
+    """基本文字清洗：轉小寫、統一台/臺、刪除多餘空格"""
+    if not text or pd.isna(text): return ""
+    t = str(text).strip().lower()
+    t = t.replace("臺", "台").replace("1樓", "").replace("一樓", "")
+    return t
+
 def is_pure_grocery(name_str):
-    if not name_str or pd.isna(name_str): return False
-    name_clean = str(name_str).strip().lower()
+    name_clean = clean_text(name_str)
     for chain in PURE_RETAIL_CHAINS:
         if name_clean == chain.lower() or name_clean.startswith(chain.lower()):
             return True
@@ -68,10 +74,10 @@ tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
     "🔍 CRM Check", "📋 KPI Sample Checker", "📖 How to Use"
 ])
 
-# ── TAB 1: CLASSIFY LEADS (純地址與 Google 類別驗證版) ──────────────
+# ── TAB 1: CLASSIFY LEADS (含欄位診斷與簡繁體對齊版) ────────────────
 with tab1:
     st.subheader("📊 Classify Leads (店名地址 + Google 類別雙重驗證引擎)")
-    st.caption("無須經緯度，直接透過店名、地址比對與 Apify 的 Google Maps 主類別進行最終判定。")
+    st.caption("透過店名與地址模糊比對，搭配 Apify 的 Google Maps 主類別進行最終判定。")
 
     c1, c2, c3 = st.columns(3)
     with c1:
@@ -95,16 +101,19 @@ with tab1:
                     l_addr_col = find_column(df_leads, ["street", "address", "地址"])
                     l_grid_col = find_column(df_leads, ["grid", "id", "account id", "lead id"])
 
-                    # 2. 捕捉 Apify 欄位
+                    # 2. 捕捉 Apify 欄位（放大辨識範圍）
                     a_grid_col = find_column(df_apify, ["grid", "id"])
-                    a_cat_col = find_column(df_apify, ["categoryname", "categories/0", "primarycategory", "categories", "category"])
+                    a_cat_col = find_column(df_apify, ["categoryname", "categories/0", "primarycategory", "categories", "category", "subTitle"])
                     a_status_col = find_column(df_apify, ["permanentlyclosed", "temporarilyclosed", "isclosed", "status"])
 
                     # 3. 捕捉 CRM 欄位
                     c_name_col = find_column(df_crm, ["account name", "company", "account", "name", "title"])
                     c_addr_col = find_column(df_crm, ["street", "address", "地址"])
 
-                    # 建立 Apify 查表字典（支援 GRID 對接或按資料列順序對接）
+                    # 顯示欄位診斷資訊，方便排查
+                    st.info(f"💡 欄位對應狀態：\n- Leads 店名/地址：`{l_name_col}` / `{l_addr_col}`\n- Apify 類別/歇業：`{a_cat_col}` / `{a_status_col}`\n- CRM 店名/地址：`{c_name_col}` / `{c_addr_col}`")
+
+                    # 建立 Apify 查表字典
                     apify_dict = {}
                     for idx, a_row in df_apify.iterrows():
                         g_id = str(a_row[a_grid_col]).strip() if a_grid_col and pd.notna(a_row[a_grid_col]) else f"INDEX_{idx}"
@@ -114,70 +123,84 @@ with tab1:
                         apify_dict[g_id] = {"category": cat, "is_closed": is_closed}
                         apify_dict[f"INDEX_{idx}"] = {"category": cat, "is_closed": is_closed}
 
-                    # 預處理 CRM 清單 (店名, 地址)
+                    # 預處理 CRM 清單
                     crm_pairs = []
                     if c_name_col and c_addr_col:
-                        c_names = df_crm[c_name_col].fillna("").astype(str).str.strip().str.lower().tolist()
-                        c_addrs = df_crm[c_addr_col].fillna("").astype(str).str.strip().str.lower().tolist()
+                        c_names = [clean_text(x) for x in df_crm[c_name_col].fillna("")]
+                        c_addrs = [clean_text(x) for x in df_crm[c_addr_col].fillna("")]
                         crm_pairs = list(zip(c_names, c_addrs))
 
                     final_statuses = []
                     matched_crm_names = []
+                    debug_reasons = []
 
                     for idx, l_row in df_leads.iterrows():
-                        l_name = str(l_row[l_name_col]).strip() if l_name_col and pd.notna(l_row[l_name_col]) else ""
-                        l_addr = str(l_row[l_addr_col]).strip() if l_addr_col and pd.notna(l_row[l_addr_col]) else ""
+                        l_name_raw = str(l_row[l_name_col]).strip() if l_name_col and pd.notna(l_row[l_name_col]) else ""
+                        l_addr_raw = str(l_row[l_addr_col]).strip() if l_addr_col and pd.notna(l_row[l_addr_col]) else ""
                         l_grid = str(l_row[l_grid_col]).strip() if l_grid_col and pd.notna(l_row[l_grid_col]) else f"INDEX_{idx}"
 
+                        l_name = clean_text(l_name_raw)
+                        l_addr = clean_text(l_addr_raw)
+
                         apify_info = apify_dict.get(l_grid, apify_dict.get(f"INDEX_{idx}", {}))
-                        cat_str = apify_info.get("category", "")
-                        is_closed_str = apify_info.get("is_closed", "False")
+                        cat_str = apify_info.get("category", "").lower()
+                        is_closed_str = str(apify_info.get("is_closed", "")).lower()
 
                         # 1. 判定歇業
-                        if "true" in is_closed_str.lower() or "closed" in is_closed_str.lower():
+                        if "true" in is_closed_str or "closed" in is_closed_str or "1" == is_closed_str:
                             final_statuses.append("Permanently Closed")
                             matched_crm_names.append("")
+                            debug_reasons.append("Google 地圖顯示歇業")
                             continue
 
                         # 2. 判定非餐飲目標 (Google 主類別)
-                        if any(g_kw in cat_str.lower() for g_kw in ["supermarket", "convenience store", "grocery store", "gift shop", "wedding store"]):
+                        grocery_tags = ["supermarket", "convenience store", "grocery store", "gift shop", "wedding store", "便利商店", "超市", "禮品店"]
+                        if any(g_kw in cat_str for g_kw in grocery_tags):
                             final_statuses.append("Wrong Target Group (WTG)")
                             matched_crm_names.append("")
+                            debug_reasons.append(f"Google 類別屬於非餐飲 ({cat_str})")
                             continue
 
                         # 3. CRM 地址與店名雙重模糊比對
                         best_status = "P1 - New Lead"
                         best_crm_name = ""
+                        debug_msg = "CRM 未發現對應紀錄"
 
                         if l_name:
-                            prefix = l_name.lower()[:2]
+                            prefix = l_name[:2]
                             for c_name, c_addr in crm_pairs:
-                                if not c_name.startswith(prefix):
+                                # 允許字首前 2 字相同，或是主要名稱包含
+                                if not (c_name.startswith(prefix) or prefix in c_name):
                                     continue
                                 
-                                name_score = SequenceMatcher(None, l_name.lower(), c_name).ratio()
-                                # 店名高相似 (>= 70%)
-                                if name_score >= 0.70:
-                                    addr_score = SequenceMatcher(None, l_addr.lower(), c_addr).ratio() if (l_addr and c_addr) else 0.0
-                                    addr_contains = (l_addr.lower() in c_addr or c_addr in l_addr.lower()) if len(l_addr) > 5 and len(c_addr) > 5 else False
+                                name_score = SequenceMatcher(None, l_name, c_name).ratio()
+                                # 店名相似度門檻降至 60% (提升捕獲率)
+                                if name_score >= 0.60:
+                                    addr_score = SequenceMatcher(None, l_addr, c_addr).ratio() if (l_addr and c_addr) else 0.0
+                                    
+                                    # 門牌數字與路名互相包含判讀
+                                    addr_contains = (l_addr in c_addr or c_addr in l_addr) if len(l_addr) > 4 and len(c_addr) > 4 else False
 
-                                    # 店名相同 + (地址高相似 OR 門牌號路名包含) -> 判定為 CRM 完全重複 (P4)
-                                    if addr_score >= 0.60 or addr_contains:
+                                    # 店名相同 + (地址模糊相似 OR 門牌號路名包含)
+                                    if addr_score >= 0.50 or addr_contains:
                                         best_status = "P4 - Duplicate"
                                         best_crm_name = c_name
+                                        debug_msg = f"命中 CRM ({c_name})"
                                         break
 
                         final_statuses.append(best_status)
                         matched_crm_names.append(best_crm_name)
+                        debug_reasons.append(debug_msg)
 
                     df_leads["Final Classification"] = final_statuses
                     df_leads["Matched CRM Name"] = matched_crm_names
+                    df_leads["判定依據說明"] = debug_reasons
 
                     counts = df_leads["Final Classification"].value_counts().to_dict()
                     st.write("### 📊 最終分類統計結果：")
                     st.write(counts)
 
-                    st.dataframe(df_leads.head(20))
+                    st.dataframe(df_leads[["Final Classification", l_name_col, "Matched CRM Name", "判定依據說明"]].head(30))
 
                     csv_out = df_leads.to_csv(index=False).encode('utf-8-sig')
                     st.download_button("📥 下載最終分類報告 (CSV)", data=csv_out, file_name="final_leads_classified.csv", mime="text/csv")
@@ -297,13 +320,16 @@ with tab4:
             else:
                 if st.button("▶ 開始 CRM 比對 (純地址版)", type="primary"):
                     with st.spinner("比對中..."):
-                        crm_names = df_crm[crm_name_col].fillna("").astype(str).str.strip().str.lower().tolist()
-                        crm_addrs = df_crm[crm_addr_col].fillna("").astype(str).str.strip().str.lower().tolist()
+                        crm_names = [clean_text(x) for x in df_crm[crm_name_col].fillna("")]
+                        crm_addrs = [clean_text(x) for x in df_crm[crm_addr_col].fillna("")]
                         crm_pairs = list(zip(crm_names, crm_addrs))
 
                         def check_single(row):
-                            r_name = str(row[raw_name_col]).lower().strip() if pd.notna(row[raw_name_col]) else ""
-                            r_addr = str(row[raw_addr_col]).lower().strip() if pd.notna(row[raw_addr_col]) else ""
+                            r_name_raw = str(row[raw_name_col]) if pd.notna(row[raw_name_col]) else ""
+                            r_addr_raw = str(row[raw_addr_col]) if pd.notna(row[raw_addr_col]) else ""
+                            
+                            r_name = clean_text(r_name_raw)
+                            r_addr = clean_text(r_addr_raw)
 
                             if not r_name:
                                 return "Unverified", "", 0.0
@@ -313,15 +339,15 @@ with tab4:
 
                             prefix = r_name[:2]
                             for c_name, c_addr in crm_pairs:
-                                if not c_name.startswith(prefix):
+                                if not (c_name.startswith(prefix) or prefix in c_name):
                                     continue
                                 
                                 name_score = SequenceMatcher(None, r_name, c_name).ratio()
-                                if name_score >= 0.70:
+                                if name_score >= 0.60:
                                     addr_score = SequenceMatcher(None, r_addr, c_addr).ratio() if (r_addr and c_addr) else 0.0
-                                    addr_contains = (r_addr in c_addr or c_addr in r_addr) if len(r_addr) > 5 and len(c_addr) > 5 else False
+                                    addr_contains = (r_addr in c_addr or c_addr in r_addr) if len(r_addr) > 4 and len(c_addr) > 4 else False
 
-                                    if addr_score >= 0.60 or addr_contains:
+                                    if addr_score >= 0.50 or addr_contains:
                                         return "P4 - Duplicate", c_name, round(((name_score + max(addr_score, 0.8))/2)*100, 1)
 
                             return "Unverified", "", 0.0
