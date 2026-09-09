@@ -86,7 +86,7 @@ with tab2:
 
             name_col = find_column(df_url, ["company / account", "company", "account", "account name", "name", "title"])
             street_col = find_column(df_url, ["street", "address", "地址"])
-            grid_col = find_column(df_url, ["grid", "id", "account id"])
+            grid_col = find_column(df_url, ["grid", "id", "account id", "lead id", "no"])
 
             if not name_col:
                 st.error("❌ Missing required column: Company / Account Name")
@@ -97,7 +97,13 @@ with tab2:
                     return f"https://www.google.com/maps/search/{quote(f'{c_name} {c_addr}'.strip())}"
 
                 df_url["url"] = df_url.apply(make_url, axis=1)
-                out_cols = [c for c in [grid_col, name_col, "url"] if c]
+                
+                # 如果找不到 GRID，自動用第 1 欄或列號建立臨時代碼
+                if not grid_col:
+                    df_url["GRID"] = [f"GRID_{i+1:06d}" for i in range(len(df_url))]
+                    grid_col = "GRID"
+
+                out_cols = [c for c in [grid_col, name_col, "url"] if c in df_url.columns]
                 res_df = df_url[out_cols]
 
                 st.dataframe(res_df.head(10))
@@ -107,40 +113,43 @@ with tab2:
             st.error(f"Error: {str(e)}")
 
     st.divider()
-    st.markdown("#### Step 2B · Re-attach GRID to Apify Export")
-    st.caption("將 Apify 爬蟲完成下載的 CSV 檔黏回 GRID 碼，方便最後匯入 Tab 1。")
+    st.markdown("#### Step 2B · Re-attach GRID / Info to Apify Export")
+    st.caption("將 Apify 爬蟲完成下載的 CSV 檔黏回原始識別碼，方便最後匯入 Tab 1。")
 
     col_a, col_b = st.columns(2)
     with col_a:
-        orig_url_file = st.file_uploader("1. 上傳剛才下載的 apify_input_urls.csv (含 GRID 與 url)", type=["csv"], key="s2b_orig")
+        orig_url_file = st.file_uploader("1. 上傳剛才下載的 apify_input_urls.csv 或 Unverified 名單", type=["csv", "xlsx"], key="s2b_orig")
     with col_b:
-        apify_raw_file = st.file_uploader("2. 上傳從 Apify 爬好的結果 CSV", type=["csv"], key="s2b_raw")
+        apify_raw_file = st.file_uploader("2. 上傳從 Apify 爬好的結果 CSV", type=["csv", "xlsx"], key="s2b_raw")
 
     if orig_url_file and apify_raw_file:
         try:
             df_orig = safe_load_csv(orig_url_file)
             df_apify = safe_load_csv(apify_raw_file)
 
-            grid_col = find_column(df_orig, ["grid", "id"])
+            grid_col = find_column(df_orig, ["grid", "id", "account id", "lead id"])
             orig_url_col = find_column(df_orig, ["url", "input_url", "searchurl"])
             apify_url_col = find_column(df_apify, ["searchstring", "inputurl", "url", "search_url"])
 
-            if not grid_col:
-                st.error("❌ 原始檔找不到 GRID 欄位。")
+            # 彈性策略：找得到 GRID 就抓 GRID，找不到就抓第 1 欄，再沒有就依索引順序對齊
+            if grid_col:
+                target_id_series = df_orig[grid_col].astype(str)
             else:
-                # 以 URL 作為比對 Key 黏回 GRID
-                if apify_url_col and orig_url_col:
-                    url_to_grid = dict(zip(df_orig[orig_url_col].astype(str), df_orig[grid_col].astype(str)))
-                    df_apify["GRID"] = df_apify[apify_url_col].astype(str).map(url_to_grid)
-                else:
-                    # 若兩邊找不到對應 URL 欄位，採 Index 順序黏回
-                    df_apify["GRID"] = df_orig[grid_col].values[:len(df_apify)]
+                target_id_series = df_orig.iloc[:, 0].astype(str)
 
-                st.success("✅ GRID 補回完成！")
-                st.dataframe(df_apify.head(10))
-                
-                csv_grid_out = df_apify.to_csv(index=False).encode('utf-8-sig')
-                st.download_button("📥 下載含 GRID 的 Apify 結果 CSV", data=csv_grid_out, file_name="apify_results_with_grid.csv", mime="text/csv")
+            # 進行黏合
+            if apify_url_col and orig_url_col:
+                url_to_grid = dict(zip(df_orig[orig_url_col].astype(str), target_id_series))
+                df_apify["GRID"] = df_apify[apify_url_col].astype(str).map(url_to_grid)
+            else:
+                # 順序對齊 (Index-based match)
+                df_apify["GRID"] = target_id_series.values[:len(df_apify)]
+
+            st.success("✅ 識別碼（GRID/ID）補回完成！")
+            st.dataframe(df_apify.head(10))
+            
+            csv_grid_out = df_apify.to_csv(index=False).encode('utf-8-sig')
+            st.download_button("📥 下載含 GRID 的 Apify 結果 CSV", data=csv_grid_out, file_name="apify_results_with_grid.csv", mime="text/csv")
         except Exception as e:
             st.error(f"處理失敗: {str(e)}")
 
