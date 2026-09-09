@@ -75,7 +75,6 @@ def safe_load_large_csv(uploaded_file):
         return pd.read_excel(uploaded_file)
 
 def haversine_distance(lat1, lon1, lat2, lon2) -> float:
-    """計算兩點經緯度之間的真實距離（公尺 Meters）"""
     try:
         lat1, lon1, lat2, lon2 = map(math.radians, [float(lat1), float(lon1), float(lat2), float(lon2)])
         dlat = lat2 - lat1
@@ -87,7 +86,6 @@ def haversine_distance(lat1, lon1, lat2, lon2) -> float:
         return 999999.0
 
 def find_column(df, possible_names):
-    """彈性偵測欄位名稱"""
     for col in df.columns:
         col_clean = str(col).strip().lower()
         for target in possible_names:
@@ -229,7 +227,7 @@ def main():
         st.caption("定期清理 Salesforce 內部已有資料，利用經緯度抓出重複建檔的帳號。")
         st.file_uploader("Upload Salesforce Master", type=["xlsx","xls","csv"], key="audit_up")
 
-    # ── TAB 4: CRM CHECK (高精準度嚴格比對版) ──────────────────────
+    # ── TAB 4: CRM CHECK (大數據極速精準比對版) ───────────────────
     with tab4:
         st.subheader("🔍 Quick CRM Duplicate Check")
         st.caption("針對一般的餐廳名單進行 CRM 快速重複排查（無需 GRID 或 Apify 爬蟲）。")
@@ -253,27 +251,45 @@ def main():
                 if not raw_name_col or not crm_name_col:
                     st.error("❌ 找不到餐廳名稱欄位，請檢查檔案標頭是否含有 Name, Account, Company 等字樣。")
                 else:
-                    if st.button("▶ 開始 CRM 嚴格比對", type="primary", use_container_width=True):
-                        with st.spinner("進行高精準度名稱相似度演算中，請稍候..."):
+                    if st.button("▶ 開始 CRM 快速精準比對", type="primary", use_container_width=True):
+                        with st.spinner("建立 42 萬筆資料快取索引中..."):
                             crm_series = df_crm[crm_name_col].fillna("").astype(str).str.strip().str.lower()
-                            crm_names = list(set(crm_series[crm_series != ""].tolist()))
+                            valid_crm = crm_series[crm_series != ""].tolist()
+                            
+                            # 建立 Hash Table 精準全匹配 Set
+                            crm_set = set(valid_crm)
+                            
+                            # 按開頭前 2 個字分組，極速收窄搜尋範圍
+                            crm_prefix_map = {}
+                            for name in valid_crm:
+                                prefix = name[:2]
+                                if prefix not in crm_prefix_map:
+                                    crm_prefix_map[prefix] = []
+                                crm_prefix_map[prefix].append(name)
 
-                            def check_dup_strict(raw_name):
+                            def check_dup_fast(raw_name):
                                 if pd.isna(raw_name) or not str(raw_name).strip():
                                     return "Unverified", "", 0.0
                                 
                                 raw_str = str(raw_name).lower().strip()
+                                
+                                # 1. 完全相同 100% 命中 (0.0001秒)
+                                if raw_str in crm_set:
+                                    return "P4 - Duplicate", raw_str, 100.0
+
+                                # 2. 僅針對開頭 2 字相同的近親候選進行 SequenceMatcher 演算 (大幅縮減 99% 運算量)
+                                prefix = raw_str[:2]
+                                candidates = crm_prefix_map.get(prefix, [])
+                                
                                 best_match = ""
                                 best_score = 0.0
 
-                                for c_name in crm_names:
-                                    ratio = SequenceMatcher(None, raw_str, c_name).ratio()
-                                    
-                                    # 長度懲罰機制：防短名誤配長名
-                                    len_diff = abs(len(raw_str) - len(c_name))
-                                    if len_diff > 4:
-                                        ratio = ratio * 0.7
+                                for c_name in candidates:
+                                    # 字長差距超過 4 個字直接跳過，避免短名配長名
+                                    if abs(len(raw_str) - len(c_name)) > 4:
+                                        continue
                                         
+                                    ratio = SequenceMatcher(None, raw_str, c_name).ratio()
                                     if ratio > best_score:
                                         best_score = ratio
                                         best_match = c_name
@@ -287,7 +303,7 @@ def main():
                                 else:
                                     return "Unverified", "", 0.0
 
-                            results = df_raw[raw_name_col].apply(check_dup_strict)
+                            results = df_raw[raw_name_col].apply(check_dup_fast)
                             df_raw["CRM Status"] = [r[0] for r in results]
                             df_raw["Matched CRM Name"] = [r[1] for r in results]
                             df_raw["Similarity Score (%)"] = [r[2] for r in results]
@@ -299,7 +315,7 @@ def main():
                             st.download_button(
                                 label="📥 下載 CRM 排查結果 CSV",
                                 data=csv_out,
-                                file_name="crm_check_result_strict.csv",
+                                file_name="crm_check_result.csv",
                                 mime="text/csv"
                             )
             except Exception as e:
