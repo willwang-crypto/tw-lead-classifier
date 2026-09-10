@@ -24,22 +24,11 @@ def check_password():
 if not check_password():
     st.stop()
 
-# 餐飲白名單標籤
-FOOD_EXPLICIT_KEYWORDS = [
-    "餐廳", "餐館", "菜館", "館", "小吃", "食堂", "麵店", "麵館", "飯", "火鍋", "燒肉", "牛排", 
-    "壽司", "拉麵", "咖啡", "飲料", "茶飲", "甜點", "甜品", "冰品", "雪糕", "酒吧", "早午餐", 
-    "早餐", "快餐", "便當", "居酒屋", "料理", "熟食", "炸雞", "餃子", "包點", "三文治", "海鮮", 
-    "小食", "美食廣場", "珍珠奶茶", "外帶", "外賣", "麵包", "烘焙", "西點", "restaurant", "cafe", "bar", "bistro"
+# 店名/公司硬攔截關鍵字
+NON_FOOD_NAME_KEYWORDS = [
+    "貿易", "生技", "股份有限公司", "有限公司", "博物館", "museum", 
+    "工場", "觀光工廠", "批發", "設備", "生鮮專賣", "器材", "實業"
 ]
-
-# 純零售/批發/景點 (絕對 WTG)
-NON_FOOD_RETAIL_KEYWORDS = [
-    "製造商", "批發商", "商店", "精品店", "有機商店", "健康食品店", "肉檔", "茶葉店", 
-    "加工肉品店", "旅遊景點", "傳統市場", "超市", "便利店", "藥局", "花店", "五金", "烘焙用具"
-]
-
-# 純傳統糕餅/禮盒 (視開關決定)
-GIFT_PASTRY_KEYWORDS = ["餅店", "糕餅", "禮盒", "朱古力", "糖果", "曲奇", "婚禮糕餅"]
 
 def clean_text(text):
     if not text or pd.isna(text): return ""
@@ -77,12 +66,10 @@ tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
     "🔍 CRM Check", "📋 KPI Sample Checker", "📖 How to Use"
 ])
 
-# ── TAB 1: CLASSIFY LEADS ─────────────────────────────────────────
+# ── TAB 1: CLASSIFY LEADS (動態全 Google 類別選擇器版) ──────────────
 with tab1:
-    st.subheader("📊 Classify Leads (Google 類別與 CRM 比對引擎)")
-    st.caption("結合 Google 地圖官方類別分流與 CRM 重複排查。")
-
-    allow_pastry = st.checkbox("☑ 是否將『餅店 / 糕餅伴手禮店』視為合格餐飲 Lead？", value=False)
+    st.subheader("📊 Classify Leads (全 Google 地圖類別動態分類引擎)")
+    st.caption("系統會自動抓取檔案中所有的 Google 類別，您可以自由勾選/剔除哪些類別屬於非目標 (WTG)。")
 
     c1, c2, c3 = st.columns(3)
     with c1:
@@ -93,20 +80,46 @@ with tab1:
         crm_up = st.file_uploader("3. 上傳 CRM All Accounts 大檔", type=["xlsx","xls","csv"], key="t1_crm")
 
     if leads_up and apify_up and crm_up:
-        st.success("✅ 3 個檔案皆已載入，點擊下方按鈕進行最終分類。")
-        if st.button("▶ 開始分類比對 (Run Classification)", type="primary", use_container_width=True):
-            with st.spinner("執行類別判定與 CRM 比對中..."):
-                try:
-                    df_leads = safe_load_csv(leads_up)
-                    df_apify = safe_load_csv(apify_up)
-                    df_crm = safe_load_csv(crm_up)
+        df_leads = safe_load_csv(leads_up)
+        df_apify = safe_load_csv(apify_up)
+        df_crm = safe_load_csv(crm_up)
 
+        # 抓取 Apify 類別欄位
+        a_cat_col = find_column(df_apify, ["categoryname", "categories/0", "primarycategory", "category"])
+        
+        # 抓出 Apify 檔案中出現過的所有 Google 類別
+        all_detected_cats = []
+        if a_cat_col and a_cat_col in df_apify.columns:
+            all_detected_cats = sorted([str(c).strip() for c in df_apify[a_cat_col].dropna().unique() if str(c).strip()])
+
+        # 自動生成非餐飲預設選擇清單
+        wtg_default_keywords = [
+            "餅店", "糕餅", "製造商", "批發", "商店", "景點", "傳統市場", "專賣", "公司", "博物館", 
+            "俱樂部", "服務", "供應商", "維修", "音響", "設備", "書", "展覽", "藝廊", "營地", 
+            "補習班", "肉檔", "肉鋪", "百貨", "內衣", "冷凍食品", "生鮮", "有機", "堅果", "健康食品", "乳酪雪糕"
+        ]
+        
+        default_selected_wtg = [
+            cat for cat in all_detected_cats 
+            if any(kw in cat for kw in wtg_default_keywords) and not any(f in cat for f in ["餐廳", "小吃", "熟食", "麵店", "咖啡", "飲料", "火鍋", "早午餐"])
+        ]
+
+        st.markdown("---")
+        st.write("### ⚙️ Google 地圖類別過濾設定 (WTG 過濾清單)")
+        selected_wtg_cats = st.multiselect(
+            f"🔍 系統自上傳檔案中掃描到 {len(all_detected_cats)} 種 Google 類別。被選中的類別將被判定為 『Wrong Target Group (WTG)』：",
+            options=all_detected_cats,
+            default=default_selected_wtg
+        )
+
+        if st.button("▶ 開始分類比對 (Run Classification)", type="primary", use_container_width=True):
+            with st.spinner("執行全類別動態判定與 CRM 比對中..."):
+                try:
                     l_name_col = find_column(df_leads, ["company / account", "company", "account", "name", "title"])
                     l_addr_col = find_column(df_leads, ["street", "address", "地址"])
 
                     a_name_col = find_column(df_apify, ["title", "name", "searchstring"])
                     a_search_col = find_column(df_apify, ["searchstring", "inputstarturl", "url"])
-                    a_cat_col = find_column(df_apify, ["categoryname", "categories/0", "primarycategory", "category"])
                     a_status_col = find_column(df_apify, ["permanentlyclosed", "temporarilyclosed", "isclosed", "status"])
 
                     c_name_col = find_column(df_crm, ["account name", "company", "account", "name", "title"])
@@ -144,6 +157,15 @@ with tab1:
                         l_name = clean_text(l_name_raw)
                         l_addr = clean_text(l_addr_raw)
 
+                        # 1. 第一層：店名本體硬過濾 (B2B/生技/貿易/工場)
+                        if any(nk in l_name for nk in NON_FOOD_NAME_KEYWORDS):
+                            final_statuses.append("Wrong Target Group (WTG)")
+                            matched_crm_names.append("")
+                            google_cats.append("由店名攔截")
+                            debug_reasons.append("店名包含非餐飲/B2B關鍵字")
+                            continue
+
+                        # 2. 搜尋 Apify 結果
                         best_apify_match = None
                         best_score = 0.0
 
@@ -162,33 +184,18 @@ with tab1:
 
                         google_cats.append(cat_str if cat_str else "未對應到")
 
-                        # 1. 判定歇業
+                        # 3. 判定歇業
                         if "true" in is_closed_str or "closed" in is_closed_str or "1" == is_closed_str:
                             final_statuses.append("Permanently Closed")
                             matched_crm_names.append("")
                             debug_reasons.append("Google 地圖標示歇業")
                             continue
 
-                        # 2. 絕對非餐飲 (零售/批發/景點)
-                        if any(nr in cat_str for nr in NON_FOOD_RETAIL_KEYWORDS):
+                        # 4. 第二層：自訂 Google 類別動態攔截
+                        if cat_str in selected_wtg_cats:
                             final_statuses.append("Wrong Target Group (WTG)")
                             matched_crm_names.append("")
-                            debug_reasons.append(f"Google 類別屬於零售/批發/景點 [{cat_str}]")
-                            continue
-
-                        # 3. 伴手禮/餅店判讀 (由開關決定)
-                        if not allow_pastry and any(gp in cat_str for gp in GIFT_PASTRY_KEYWORDS):
-                            final_statuses.append("Wrong Target Group (WTG)")
-                            matched_crm_names.append("")
-                            debug_reasons.append(f"Google 類別屬於餅店/糕餅伴手禮 [{cat_str}]")
-                            continue
-
-                        # 4. 餐飲白名單檢驗
-                        is_food = any(kw.lower() in cat_str.lower() for kw in FOOD_EXPLICIT_KEYWORDS)
-                        if cat_str and not is_food and not (allow_pastry and any(gp in cat_str for gp in GIFT_PASTRY_KEYWORDS)):
-                            final_statuses.append("Wrong Target Group (WTG)")
-                            matched_crm_names.append("")
-                            debug_reasons.append(f"Google 類別 [{cat_str}] 不屬於餐飲目標")
+                            debug_reasons.append(f"Google 類別屬於選定的 WTG [{cat_str}]")
                             continue
 
                         # 5. CRM 重複比對
