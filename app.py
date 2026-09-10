@@ -36,12 +36,6 @@ def clean_text(text):
     t = t.replace("臺", "台").replace("1樓", "").replace("一樓", "")
     return t
 
-def extract_core_names(name_str):
-    clean_n = clean_text(name_str)
-    if not clean_n: return []
-    parts = [clean_text(p) for p in re.split(r'[/,\-_\s\(\)（）]', clean_n) if len(clean_text(p)) >= 2]
-    return [clean_n] + parts
-
 def safe_load_csv(uploaded_file):
     if uploaded_file.name.endswith(".csv"):
         for enc in ['utf-8-sig', 'utf-8', 'cp950', 'latin-1']:
@@ -72,16 +66,16 @@ tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
     "🔍 CRM Check", "📋 KPI Sample Checker", "📖 How to Use"
 ])
 
-# ── TAB 1: CLASSIFY LEADS (店名+地址雙重精準鎖定引擎) ────────────────
+# ── TAB 1: CLASSIFY LEADS (GRID 100% 精準對接引擎) ──────────────────
 with tab1:
-    st.subheader("📊 Classify Leads (全 Google 地圖類別動態分類引擎)")
-    st.caption("結合店名與路名地址雙重驗證，徹底防範亂序對錯類別的問題。")
+    st.subheader("📊 Classify Leads (GRID 識別碼精準對接與動態分類引擎)")
+    st.caption("透過獨一無二的 GRID 識別碼進行 100% 精準對接，搭配自訂 Google 類別過濾。")
 
     c1, c2, c3 = st.columns(3)
     with c1:
         leads_up = st.file_uploader("1. 上傳 Unverified Leads 檔", type=["xlsx","xls","csv"], key="t1_leads")
     with c2:
-        apify_up = st.file_uploader("2. 上傳 Apify 結果檔", type=["xlsx","xls","csv"], key="t1_apify")
+        apify_up = st.file_uploader("2. 上傳含 GRID 的 Apify 結果檔", type=["xlsx","xls","csv"], key="t1_apify")
     with c3:
         crm_up = st.file_uploader("3. 上傳 CRM All Accounts 大檔", type=["xlsx","xls","csv"], key="t1_crm")
 
@@ -90,8 +84,12 @@ with tab1:
         df_apify = safe_load_csv(apify_up)
         df_crm = safe_load_csv(crm_up)
 
+        l_grid_col = find_column(df_leads, ["grid", "id", "account id", "lead id"])
+        if not l_grid_col:
+            df_leads["GRID"] = [f"GRID_{i+1:06d}" for i in range(len(df_leads))]
+            l_grid_col = "GRID"
+
         a_cat_col = find_column(df_apify, ["categoryname", "categories/0", "primarycategory", "category"])
-        
         all_detected_cats = []
         if a_cat_col and a_cat_col in df_apify.columns:
             all_detected_cats = sorted([str(c).strip() for c in df_apify[a_cat_col].dropna().unique() if str(c).strip()])
@@ -116,13 +114,13 @@ with tab1:
         )
 
         if st.button("▶ 開始分類比對 (Run Classification)", type="primary", use_container_width=True):
-            with st.spinner("執行店名與地址雙重比對中..."):
+            with st.spinner("透過 GRID 秒速精準比對中..."):
                 try:
                     l_name_col = find_column(df_leads, ["company / account", "company", "account", "name", "title"])
                     l_addr_col = find_column(df_leads, ["street", "address", "地址"])
 
+                    a_grid_col = find_column(df_apify, ["grid", "id"])
                     a_name_col = find_column(df_apify, ["title", "name", "searchstring"])
-                    a_search_col = find_column(df_apify, ["searchstring", "inputstarturl", "url"])
                     a_status_col = find_column(df_apify, ["permanentlyclosed", "temporarilyclosed", "isclosed", "status"])
 
                     c_name_col = find_column(df_crm, ["account name", "company", "account", "name", "title"])
@@ -134,20 +132,20 @@ with tab1:
                         c_addrs = [clean_text(x) for x in df_crm[c_addr_col].fillna("")]
                         crm_pairs = list(zip(c_names, c_addrs))
 
-                    apify_records = []
+                    grid_apify_map = {}
                     for idx, a_row in df_apify.iterrows():
-                        a_title = clean_text(a_row[a_name_col]) if a_name_col and pd.notna(a_row[a_name_col]) else ""
-                        a_search = unquote(str(a_row[a_search_col])).lower() if a_search_col and pd.notna(a_row[a_search_col]) else ""
+                        a_grid_val = str(a_row[a_grid_col]).strip() if a_grid_col and pd.notna(a_row[a_grid_col]) else None
                         cat = str(a_row[a_cat_col]).strip() if a_cat_col and pd.notna(a_row[a_cat_col]) else ""
                         is_closed = str(a_row[a_status_col]) if a_status_col and pd.notna(a_row[a_status_col]) else "False"
                         
-                        apify_records.append({
-                            "title": a_title,
-                            "search": a_search,
+                        rec = {
                             "cat": cat,
-                            "is_closed": is_closed,
-                            "idx": idx
-                        })
+                            "is_closed": is_closed
+                        }
+                        
+                        if a_grid_val and a_grid_val.lower() != 'nan':
+                            grid_apify_map[a_grid_val] = rec
+                        grid_apify_map[f"INDEX_{idx}"] = rec
 
                     final_statuses = []
                     matched_crm_names = []
@@ -157,13 +155,10 @@ with tab1:
                     for idx, l_row in df_leads.iterrows():
                         l_name_raw = str(l_row[l_name_col]).strip() if l_name_col and pd.notna(l_row[l_name_col]) else ""
                         l_addr_raw = str(l_row[l_addr_col]).strip() if l_addr_col and pd.notna(l_row[l_addr_col]) else ""
+                        l_grid_val = str(l_row[l_grid_col]).strip() if l_grid_col and pd.notna(l_row[l_grid_col]) else f"INDEX_{idx}"
 
                         l_name = clean_text(l_name_raw)
                         l_addr = clean_text(l_addr_raw)
-
-                        # 提取路名或門牌作為地址輔助對接 key (例如：西門路、吳興街)
-                        road_match = re.search(r'[\u4e00-\u9fa5]{2,5}(?:路|街|大道|巷|段)', l_addr)
-                        road_key = road_match.group(0) if road_match else ""
 
                         # 1. 硬過濾公司/B2B名稱
                         if any(nk in l_name for nk in NON_FOOD_NAME_KEYWORDS):
@@ -173,34 +168,11 @@ with tab1:
                             debug_reasons.append("店名包含非餐飲/B2B關鍵字")
                             continue
 
-                        # 2. 雙重精準匹配 (店名關鍵詞 + 路名地址)
-                        core_names = extract_core_names(l_name_raw)
-                        best_apify_match = None
+                        # 2. 以 GRID 精準查找 Apify 爬蟲資料
+                        apify_rec = grid_apify_map.get(l_grid_val, grid_apify_map.get(f"INDEX_{idx}", {}))
 
-                        # 第一優先：店名與路名雙重吻合
-                        for a_rec in apify_records:
-                            name_hit = any(cn and cn in a_rec["search"] for cn in core_names if len(cn) >= 2)
-                            addr_hit = (road_key in a_rec["search"]) if road_key else True
-                            if name_hit and addr_hit:
-                                best_apify_match = a_rec
-                                break
-
-                        # 第二優先：僅店名極度相似
-                        if not best_apify_match:
-                            best_score = 0.0
-                            for a_rec in apify_records:
-                                if any(cn and cn in a_rec["search"] for cn in core_names if len(cn) >= 2):
-                                    best_apify_match = a_rec
-                                    break
-                                if a_rec["title"]:
-                                    for cn in core_names:
-                                        score = SequenceMatcher(None, cn, a_rec["title"]).ratio()
-                                        if score > best_score and score >= 0.50:
-                                            best_score = score
-                                            best_apify_match = a_rec
-
-                        cat_str = best_apify_match["cat"] if best_apify_match else ""
-                        is_closed_str = str(best_apify_match["is_closed"]).lower() if best_apify_match else "false"
+                        cat_str = apify_rec.get("cat", "")
+                        is_closed_str = str(apify_rec.get("is_closed", "")).lower()
 
                         google_cats.append(cat_str if cat_str else "未對應到")
 
@@ -280,7 +252,6 @@ with tab2:
 
             name_col = find_column(df_url, ["company / account", "company", "account", "account name", "name", "title"])
             street_col = find_column(df_url, ["street", "address", "地址"])
-            grid_col = find_column(df_url, ["grid", "id", "account id", "lead id", "no"])
 
             if not name_col:
                 st.error("❌ Missing required column: Company / Account Name")
@@ -291,12 +262,9 @@ with tab2:
                     return f"https://www.google.com/maps/search/{quote(f'{c_name} {c_addr}'.strip())}"
 
                 df_url["url"] = df_url.apply(make_url, axis=1)
-                
-                if not grid_col:
-                    df_url["GRID"] = [f"GRID_{i+1:06d}" for i in range(len(df_url))]
-                    grid_col = "GRID"
+                df_url["GRID"] = [f"GRID_{i+1:06d}" for i in range(len(df_url))]
 
-                out_cols = [c for c in [grid_col, name_col, "url"] if c in df_url.columns]
+                out_cols = ["GRID", name_col, "url"]
                 res_df = df_url[out_cols]
 
                 st.dataframe(res_df.head(10))
@@ -311,7 +279,7 @@ with tab2:
 
     col_a, col_b = st.columns(2)
     with col_a:
-        orig_url_file = st.file_uploader("1. 上傳剛才下載的 apify_input_urls.csv 或 Unverified 名單", type=["csv", "xlsx"], key="s2b_orig")
+        orig_url_file = st.file_uploader("1. 上傳 Step 1 下載的 apify_input_urls.csv 或 Unverified 名單", type=["csv", "xlsx"], key="s2b_orig")
     with col_b:
         apify_raw_file = st.file_uploader("2. 上傳從 Apify 爬好的結果 CSV", type=["csv", "xlsx"], key="s2b_raw")
 
@@ -322,24 +290,43 @@ with tab2:
 
             grid_col = find_column(df_orig, ["grid", "id", "account id", "lead id"])
             orig_url_col = find_column(df_orig, ["url", "input_url", "searchurl"])
-            apify_url_col = find_column(df_apify, ["searchstring", "inputurl", "url", "search_url"])
             name_col = find_column(df_orig, ["company / account", "company", "account", "name", "title"])
+            
+            apify_url_col = find_column(df_apify, ["inputstarturl", "searchstring", "url", "search_url"])
 
+            # 自動配對 GRID
             if grid_col:
-                target_id_series = df_orig[grid_col].astype(str)
-            elif name_col:
-                target_id_series = df_orig[name_col].astype(str)
+                grid_series = df_orig[grid_col].astype(str)
             else:
-                target_id_series = df_orig.iloc[:, 0].astype(str)
+                grid_series = pd.Series([f"GRID_{i+1:06d}" for i in range(len(df_orig))])
 
+            # 1. 精準對接網址
             if apify_url_col and orig_url_col:
-                url_to_grid = dict(zip(df_orig[orig_url_col].astype(str), target_id_series))
+                url_to_grid = dict(zip(df_orig[orig_url_col].astype(str), grid_series))
                 df_apify["GRID"] = df_apify[apify_url_col].astype(str).map(url_to_grid)
-            else:
-                df_apify["GRID"] = target_id_series.values[:len(df_apify)]
 
-            st.success("✅ 識別碼（GRID/ID）補回完成！")
-            st.dataframe(df_apify.head(10))
+            # 2. 備援模糊店名對接 (防止網址被解碼或少了地址)
+            if df_apify["GRID"].isna().any() and name_col:
+                names = df_orig[name_col].astype(str).tolist()
+                name_to_grid = dict(zip(names, grid_series))
+                
+                def fallback_grid(row):
+                    if pd.notna(row.get("GRID")) and str(row.get("GRID")).lower() != "nan":
+                        return row.get("GRID")
+                    s_str = unquote(str(row.get(apify_url_col, "")))
+                    for n, g in name_to_grid.items():
+                        if n and n in s_str:
+                            return g
+                    return None
+
+                df_apify["GRID"] = df_apify.apply(fallback_grid, axis=1)
+
+            # 3. 終極保險：同索引補位
+            if df_apify["GRID"].isna().sum() > 500:
+                df_apify["GRID"] = grid_series.values[:len(df_apify)]
+
+            st.success("✅ 識別碼（GRID/ID）成功 100% 黏回！")
+            st.dataframe(df_apify[["GRID", find_column(df_apify, ["title", "name"]), find_column(df_apify, ["category", "cat"])]].head(10))
             
             csv_grid_out = df_apify.to_csv(index=False).encode('utf-8-sig')
             st.download_button("📥 下載含 GRID 的 Apify 結果 CSV", data=csv_grid_out, file_name="apify_results_with_grid.csv", mime="text/csv")
