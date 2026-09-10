@@ -39,7 +39,7 @@ def clean_text(text):
 def extract_core_names(name_str):
     clean_n = clean_text(name_str)
     if not clean_n: return []
-    parts = [clean_text(p) for p in re.split(r'[/,\-_\s]', clean_n) if len(clean_text(p)) >= 2]
+    parts = [clean_text(p) for p in re.split(r'[/,\-_\s\(\)（）]', clean_n) if len(clean_text(p)) >= 2]
     return [clean_n] + parts
 
 def safe_load_csv(uploaded_file):
@@ -72,10 +72,10 @@ tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
     "🔍 CRM Check", "📋 KPI Sample Checker", "📖 How to Use"
 ])
 
-# ── TAB 1: CLASSIFY LEADS (GRID空值雙保險容錯對齊引擎) ───────────────
+# ── TAB 1: CLASSIFY LEADS (店名+地址雙重精準鎖定引擎) ────────────────
 with tab1:
     st.subheader("📊 Classify Leads (全 Google 地圖類別動態分類引擎)")
-    st.caption("支援 GRID 精準對接與店名自動容錯匹配，確保 100% 帶出 Google 官方類別。")
+    st.caption("結合店名與路名地址雙重驗證，徹底防範亂序對錯類別的問題。")
 
     c1, c2, c3 = st.columns(3)
     with c1:
@@ -116,13 +116,11 @@ with tab1:
         )
 
         if st.button("▶ 開始分類比對 (Run Classification)", type="primary", use_container_width=True):
-            with st.spinner("執行全類別動態判定與 CRM 比對中..."):
+            with st.spinner("執行店名與地址雙重比對中..."):
                 try:
                     l_name_col = find_column(df_leads, ["company / account", "company", "account", "name", "title"])
                     l_addr_col = find_column(df_leads, ["street", "address", "地址"])
-                    l_grid_col = find_column(df_leads, ["grid", "id", "account id", "lead id"])
 
-                    a_grid_col = find_column(df_apify, ["grid", "id"])
                     a_name_col = find_column(df_apify, ["title", "name", "searchstring"])
                     a_search_col = find_column(df_apify, ["searchstring", "inputstarturl", "url"])
                     a_status_col = find_column(df_apify, ["permanentlyclosed", "temporarilyclosed", "isclosed", "status"])
@@ -136,29 +134,20 @@ with tab1:
                         c_addrs = [clean_text(x) for x in df_crm[c_addr_col].fillna("")]
                         crm_pairs = list(zip(c_names, c_addrs))
 
-                    # 預處理 Apify 查表，同時支援 GRID 查表與列表查表
-                    grid_map = {}
                     apify_records = []
-
                     for idx, a_row in df_apify.iterrows():
-                        a_grid_val = str(a_row[a_grid_col]).strip() if a_grid_col and pd.notna(a_row[a_grid_col]) and str(a_row[a_grid_col]).strip().lower() != 'nan' else None
                         a_title = clean_text(a_row[a_name_col]) if a_name_col and pd.notna(a_row[a_name_col]) else ""
                         a_search = unquote(str(a_row[a_search_col])).lower() if a_search_col and pd.notna(a_row[a_search_col]) else ""
                         cat = str(a_row[a_cat_col]).strip() if a_cat_col and pd.notna(a_row[a_cat_col]) else ""
                         is_closed = str(a_row[a_status_col]) if a_status_col and pd.notna(a_row[a_status_col]) else "False"
                         
-                        rec = {
-                            "grid": a_grid_val,
+                        apify_records.append({
                             "title": a_title,
                             "search": a_search,
                             "cat": cat,
                             "is_closed": is_closed,
                             "idx": idx
-                        }
-                        
-                        if a_grid_val:
-                            grid_map[a_grid_val] = rec
-                        apify_records.append(rec)
+                        })
 
                     final_statuses = []
                     matched_crm_names = []
@@ -168,10 +157,13 @@ with tab1:
                     for idx, l_row in df_leads.iterrows():
                         l_name_raw = str(l_row[l_name_col]).strip() if l_name_col and pd.notna(l_row[l_name_col]) else ""
                         l_addr_raw = str(l_row[l_addr_col]).strip() if l_addr_col and pd.notna(l_row[l_addr_col]) else ""
-                        l_grid_val = str(l_row[l_grid_col]).strip() if l_grid_col and pd.notna(l_row[l_grid_col]) and str(l_row[l_grid_col]).strip().lower() != 'nan' else None
 
                         l_name = clean_text(l_name_raw)
                         l_addr = clean_text(l_addr_raw)
+
+                        # 提取路名或門牌作為地址輔助對接 key (例如：西門路、吳興街)
+                        road_match = re.search(r'[\u4e00-\u9fa5]{2,5}(?:路|街|大道|巷|段)', l_addr)
+                        road_key = road_match.group(0) if road_match else ""
 
                         # 1. 硬過濾公司/B2B名稱
                         if any(nk in l_name for nk in NON_FOOD_NAME_KEYWORDS):
@@ -181,30 +173,29 @@ with tab1:
                             debug_reasons.append("店名包含非餐飲/B2B關鍵字")
                             continue
 
+                        # 2. 雙重精準匹配 (店名關鍵詞 + 路名地址)
+                        core_names = extract_core_names(l_name_raw)
                         best_apify_match = None
 
-                        # 優先對接 GRID
-                        if l_grid_val and l_grid_val in grid_map:
-                            best_apify_match = grid_map[l_grid_val]
-                        
-                        # 備援 1：如無 GRID 或 GRID 無效，試同索引 Row Alignment
-                        if not best_apify_match and idx < len(apify_records):
-                            rec_idx = apify_records[idx]
-                            if l_name and (l_name in rec_idx["search"] or l_name in rec_idx["title"]):
-                                best_apify_match = rec_idx
+                        # 第一優先：店名與路名雙重吻合
+                        for a_rec in apify_records:
+                            name_hit = any(cn and cn in a_rec["search"] for cn in core_names if len(cn) >= 2)
+                            addr_hit = (road_key in a_rec["search"]) if road_key else True
+                            if name_hit and addr_hit:
+                                best_apify_match = a_rec
+                                break
 
-                        # 備援 2：全表核心店名多重搜尋
+                        # 第二優先：僅店名極度相似
                         if not best_apify_match:
-                            core_names = extract_core_names(l_name_raw)
                             best_score = 0.0
                             for a_rec in apify_records:
-                                if any(cn and cn in a_rec["search"] for cn in core_names):
+                                if any(cn and cn in a_rec["search"] for cn in core_names if len(cn) >= 2):
                                     best_apify_match = a_rec
                                     break
                                 if a_rec["title"]:
                                     for cn in core_names:
                                         score = SequenceMatcher(None, cn, a_rec["title"]).ratio()
-                                        if score > best_score and score >= 0.35:
+                                        if score > best_score and score >= 0.50:
                                             best_score = score
                                             best_apify_match = a_rec
 
@@ -213,21 +204,21 @@ with tab1:
 
                         google_cats.append(cat_str if cat_str else "未對應到")
 
-                        # 2. 判定歇業
+                        # 3. 判定歇業
                         if "true" in is_closed_str or "closed" in is_closed_str or "1" == is_closed_str:
                             final_statuses.append("Permanently Closed")
                             matched_crm_names.append("")
                             debug_reasons.append("Google 地圖標示歇業")
                             continue
 
-                        # 3. 自訂 Google 類別動態攔截
+                        # 4. 自訂 Google 類別動態攔截
                         if cat_str in selected_wtg_cats:
                             final_statuses.append("Wrong Target Group (WTG)")
                             matched_crm_names.append("")
                             debug_reasons.append(f"Google 類別屬於選定的 WTG [{cat_str}]")
                             continue
 
-                        # 4. CRM 重複比對
+                        # 5. CRM 重複比對
                         best_status = "P1 - New Lead"
                         best_crm_name = ""
                         debug_msg = f"驗證通過 (Google類別: {cat_str or '未對應到，店名正常'})"
@@ -353,7 +344,7 @@ with tab2:
             csv_grid_out = df_apify.to_csv(index=False).encode('utf-8-sig')
             st.download_button("📥 下載含 GRID 的 Apify 結果 CSV", data=csv_grid_out, file_name="apify_results_with_grid.csv", mime="text/csv")
         except Exception as e:
-            st.error(f"處理失敗: {str(e)}")
+            st.error(f"錯誤: {str(e)}")
 
 # ── TAB 4: CRM CHECK ─────────────────────────────────────────────
 with tab4:
@@ -364,7 +355,7 @@ with tab4:
     with col1:
         raw_list_up = st.file_uploader("1. 上傳 Raw 餐廳名單 (.csv)", type=["csv", "xlsx"], key="t4_raw")
     with col2:
-        crm_accounts_up = st.file_uploader("2. 上传 CRM All Accounts (.csv)", type=["csv", "xlsx"], key="t4_crm")
+        crm_accounts_up = st.file_uploader("2. 上傳 CRM All Accounts (.csv)", type=["csv", "xlsx"], key="t4_crm")
 
     if raw_list_up and crm_accounts_up:
         try:
