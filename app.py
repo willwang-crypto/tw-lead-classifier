@@ -121,7 +121,6 @@ with tab1:
 
                     a_grid_col = find_column(df_apify, ["grid", "id"])
                     a_name_col = find_column(df_apify, ["title", "name", "searchstring"])
-                    a_search_col = find_column(df_apify, ["inputstarturl", "searchstring", "url"])
                     a_status_col = find_column(df_apify, ["permanentlyclosed", "temporarilyclosed", "isclosed", "status"])
 
                     c_name_col = find_column(df_crm, ["account name", "company", "account", "name", "title"])
@@ -310,12 +309,12 @@ with tab2:
             else:
                 grid_series = pd.Series([f"GRID_{i+1:06d}" for i in range(len(df_orig))])
 
-            # 建立多維度對照映射
+            # 建立 URL 和 店名 對接映射表
             url_to_grid = {}
             if orig_url_col:
                 for g, u in zip(grid_series, df_orig[orig_url_col]):
-                    url_to_grid[str(u).strip()] = g
-                    url_to_grid[unquote(str(u)).strip()] = g
+                    url_to_grid[str(u).strip().lower()] = g
+                    url_to_grid[unquote(str(u)).strip().lower()] = g
 
             name_to_grid = {}
             if name_col:
@@ -323,24 +322,23 @@ with tab2:
                     if pd.notna(n):
                         name_to_grid[clean_text(n)] = g
 
-            def match_row_grid(row):
-                # 1. 精準網址對接
-                a_url_raw = str(row.get(apify_url_col, "")).strip()
-                if a_url_raw in url_to_grid:
-                    return url_to_grid[a_url_raw]
-                
-                a_url_unq = unquote(a_url_raw).strip()
-                if a_url_unq in url_to_grid:
-                    return url_to_grid[a_url_unq]
+            def match_row_grid_robust(row):
+                raw_url = str(row.get(apify_url_col, "")).strip().lower()
+                unq_url = unquote(raw_url).strip().lower()
+                srch_str = unquote(str(row.get("searchString", raw_url))).strip().lower()
+
+                # 1. 網址精準對接
+                if raw_url in url_to_grid: return url_to_grid[raw_url]
+                if unq_url in url_to_grid: return url_to_grid[unq_url]
 
                 # 2. 店名對接 (解決網址帶/不帶地址的差異)
-                srch_str = unquote(str(row.get(apify_url_col, "")))
                 for n_k, g_v in name_to_grid.items():
-                    if n_k and n_k in srch_str:
+                    if n_k and len(n_k) >= 2 and (n_k in unq_url or n_k in srch_str):
                         return g_v
+
                 return None
 
-            df_apify["GRID"] = df_apify.apply(match_row_grid, axis=1)
+            df_apify["GRID"] = df_apify.apply(match_row_grid_robust, axis=1)
 
             st.success("✅ 識別碼（GRID/ID）已 100% 精準對接黏回！")
             st.dataframe(df_apify[["GRID", find_column(df_apify, ["title", "name"]), find_column(df_apify, ["category", "cat"])]].head(10))
@@ -402,7 +400,7 @@ with tab4:
                                 name_score = SequenceMatcher(None, r_name, c_name).ratio()
                                 if name_score >= 0.60:
                                     addr_score = SequenceMatcher(None, r_addr, c_addr).ratio() if (r_addr and c_addr) else 0.0
-                                    addr_contains = (r_addr in c_addr or c_addr in r_addr) if len(r_addr) > 4 and len(c_addr) > 4 else False
+                                    addr_contains = (l_addr in c_addr or c_addr in l_addr) if len(r_addr) > 4 and len(c_addr) > 4 else False
 
                                     if addr_score >= 0.50 or addr_contains:
                                         return "P4 - Duplicate", c_name, round(((name_score + max(addr_score, 0.8))/2)*100, 1)
