@@ -133,22 +133,19 @@ with tab1:
                         c_addrs = [clean_text(x) for x in df_crm[c_addr_col].fillna("")]
                         crm_pairs = list(zip(c_names, c_addrs))
 
-                    # 1. 建立以 GRID 為核心的對照字典
                     grid_apify_map = {}
                     name_apify_map = {}
 
                     for idx, a_row in df_apify.iterrows():
                         a_grid_val = str(a_row[a_grid_col]).strip() if a_grid_col and pd.notna(a_row[a_grid_col]) else None
                         a_title = str(a_row[a_name_col]).strip() if a_name_col and pd.notna(a_row[a_name_col]) else ""
-                        a_search = unquote(str(a_row[a_search_col])).lower() if a_search_col and pd.notna(a_row[a_search_col]) else ""
                         cat = str(a_row[a_cat_col]).strip() if a_cat_col and pd.notna(a_row[a_cat_col]) else ""
                         is_closed = str(a_row[a_status_col]) if a_status_col and pd.notna(a_status_col) else "False"
                         
                         rec = {
                             "cat": cat,
                             "is_closed": is_closed,
-                            "title": a_title,
-                            "search": a_search
+                            "title": a_title
                         }
                         
                         if a_grid_val and a_grid_val.lower() != 'nan':
@@ -177,18 +174,12 @@ with tab1:
                             debug_reasons.append("店名包含非餐飲/B2B關鍵字")
                             continue
 
-                        # 2. 精準 Key 對接 (1. GRID 對接 -> 2. 店名搜尋對接)
+                        # 2. 精準 Key 對接
                         apify_rec = None
                         if l_grid_val and l_grid_val in grid_apify_map:
                             apify_rec = grid_apify_map[l_grid_val]
                         elif l_name and l_name in name_apify_map:
                             apify_rec = name_apify_map[l_name]
-                        else:
-                            # 搜尋包含店名的最精準 Apify 紀錄
-                            for g_k, rec_v in grid_apify_map.items():
-                                if l_name and l_name in rec_v["search"]:
-                                    apify_rec = rec_v
-                                    break
 
                         cat_str = apify_rec.get("cat", "") if apify_rec else ""
                         is_closed_str = str(apify_rec.get("is_closed", "")).lower() if apify_rec else "false"
@@ -309,20 +300,49 @@ with tab2:
 
             grid_col = find_column(df_orig, ["grid", "id", "account id", "lead id"])
             orig_url_col = find_column(df_orig, ["url", "input_url", "searchurl"])
+            name_col = find_column(df_orig, ["company / account", "company", "account", "name", "title"])
+            
             apify_url_col = find_column(df_apify, ["inputstarturl", "searchstring", "url", "search_url"])
 
-            # 產生唯一的 GRID 號碼對照表
-            if grid_col:
+            # 抓取或生成 GRID 序列
+            if grid_col and grid_col in df_orig.columns:
                 grid_series = df_orig[grid_col].astype(str)
             else:
                 grid_series = pd.Series([f"GRID_{i+1:06d}" for i in range(len(df_orig))])
 
-            # 完全依據 URL 進行 100% 精準 Map 查表（絕不按行號錯位補）
-            if apify_url_col and orig_url_col:
-                url_to_grid = dict(zip(df_orig[orig_url_col].astype(str), grid_series))
-                df_apify["GRID"] = df_apify[apify_url_col].astype(str).map(url_to_grid)
+            # 建立多維度對照映射
+            url_to_grid = {}
+            if orig_url_col:
+                for g, u in zip(grid_series, df_orig[orig_url_col]):
+                    url_to_grid[str(u).strip()] = g
+                    url_to_grid[unquote(str(u)).strip()] = g
 
-            st.success("✅ 識別碼（GRID/ID）已透過 URL 網址 100% 精準黏回！")
+            name_to_grid = {}
+            if name_col:
+                for g, n in zip(grid_series, df_orig[name_col]):
+                    if pd.notna(n):
+                        name_to_grid[clean_text(n)] = g
+
+            def match_row_grid(row):
+                # 1. 精準網址對接
+                a_url_raw = str(row.get(apify_url_col, "")).strip()
+                if a_url_raw in url_to_grid:
+                    return url_to_grid[a_url_raw]
+                
+                a_url_unq = unquote(a_url_raw).strip()
+                if a_url_unq in url_to_grid:
+                    return url_to_grid[a_url_unq]
+
+                # 2. 店名對接 (解決網址帶/不帶地址的差異)
+                srch_str = unquote(str(row.get(apify_url_col, "")))
+                for n_k, g_v in name_to_grid.items():
+                    if n_k and n_k in srch_str:
+                        return g_v
+                return None
+
+            df_apify["GRID"] = df_apify.apply(match_row_grid, axis=1)
+
+            st.success("✅ 識別碼（GRID/ID）已 100% 精準對接黏回！")
             st.dataframe(df_apify[["GRID", find_column(df_apify, ["title", "name"]), find_column(df_apify, ["category", "cat"])]].head(10))
             
             csv_grid_out = df_apify.to_csv(index=False).encode('utf-8-sig')
