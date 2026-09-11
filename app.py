@@ -70,7 +70,7 @@ def find_column(df, possible_names):
 st.set_page_config(page_title="Sales Ops Suite", layout="wide")
 st.title("Sales Ops · Data Quality Suite — Taiwan")
 
-# 調整 Tab 順序，整合所有 6 個頁籤
+# 整合所有 6 個頁籤
 tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
     "🔗 Step 1: 生成爬蟲網址", 
     "📌 Step 2: 黏合 GRID 識別碼", 
@@ -85,11 +85,6 @@ with tab1:
     st.subheader("🔗 Step 1 · 生成帶有 GRID 識別碼的 Google 地圖搜尋網址")
     st.caption("自動將店名與地址組裝為 Google 地圖 URL，並編發獨一無二的 GRID 流水號。")
 
-    url_mode = st.radio(
-        "URL 格式設定",
-        ["📝 Company / Account + Address"],
-        key="url_mode"
-    )
     uploaded_url_file = st.file_uploader("1. 上傳原始 Raw Leads 名單 (.csv / .xlsx)", type=["xlsx","xls","csv"], key="url_leads")
 
     if uploaded_url_file is not None:
