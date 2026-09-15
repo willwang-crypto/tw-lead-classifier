@@ -25,10 +25,16 @@ def check_password():
 if not check_password():
     st.stop()
 
-# 店名/公司硬攔截關鍵字 (WTG)
+# 店名/公司硬攔截關鍵字 (WTG) - 完整擴充 59 個指定關鍵字
 NON_FOOD_NAME_KEYWORDS = [
-    "貿易", "生技", "股份有限公司", "有限公司", "博物館", "museum", 
-    "工場", "觀光工廠", "批發", "設備", "生鮮專賣", "器材", "實業"
+    "有限公司", "裝修", "設計", "工程", "除毛", "禮餅舖", "團購", "不鏽鋼", "餐飲設備", 
+    "公園店", "食品行", "喜餅", "休閒池", "museum", "批發", "伴手禮", "松機", "食品廠", 
+    "通訊", "囍餅", "美甲", "休閒農場", "高價回收", "辦事處", "桌遊", "庇護", "房屋", 
+    "美學館", "工作室", "太陽堂", "新月台", "做臉", "渡假中心", "婚宴會館", "越式頭療", 
+    "觀光工場", "無對外販售", "無店面", "手工蛋捲", "順成蛋糕", "機車", "農場", "民宿", 
+    "無人拉麵", "復興航棧", "書店", "電競", "草莓園", "旅行社", "大飯店", "基金會", 
+    "糕餅", "紀念中心", "休息站", "服務區", "活動中心", "訓練中心", "社團法人", "馥漫",
+    "貿易", "生技", "股份有限公司", "博物館", "工場", "觀光工廠", "設備", "生鮮專賣", "器材", "實業"
 ]
 
 def clean_text(text):
@@ -186,7 +192,7 @@ with tab2:
 # ── TAB 3: Step 3 · Classify Leads & Filter ───────────────────────
 with tab3:
     st.subheader("📊 Step 3 · 全 Google 地圖類別動態過濾與 CRM 比對")
-    st.caption("透過 GRID 進行 100% 精準對接，自動排除非餐飲店家 (WTG)、歇業店家與 CRM 既有重複名單 (P4)。")
+    st.caption("透過 GRID 進行 100% 精準對接，自動排除 WTG 與歇業，命中 P4 - Duplicate 時附上 Salesforce GRID。")
 
     c1, c2, c3 = st.columns(3)
     with c1:
@@ -201,7 +207,6 @@ with tab3:
         df_apify = safe_load_csv(apify_up)
         df_crm = safe_load_csv(crm_up)
 
-        # 鎖定與生成 GRID 欄位
         l_grid_col = find_column(df_leads, ["grid", "lead id", "account id"])
         if not l_grid_col or l_grid_col not in df_leads.columns:
             df_leads["GRID"] = [f"GRID_{i+1:06d}" for i in range(len(df_leads))]
@@ -212,15 +217,10 @@ with tab3:
         if a_cat_col and a_cat_col in df_apify.columns:
             all_detected_cats = sorted([str(c).strip() for c in df_apify[a_cat_col].dropna().unique() if str(c).strip()])
 
-        wtg_default_keywords = [
-            "餅店", "糕餅", "製造商", "批發", "商店", "景點", "傳統市場", "專賣", "公司", "博物館", 
-            "俱樂部", "服務", "供應商", "維修", "音響", "設備", "書", "展覽", "藝廊", "營地", 
-            "補習班", "肉檔", "肉鋪", "百貨", "內衣", "冷凍食品", "生鮮", "有機", "堅果", "健康食品", "乳酪雪糕"
-        ]
-        
         default_selected_wtg = [
             cat for cat in all_detected_cats 
-            if any(kw in cat for kw in wtg_default_keywords) and not any(f in cat for f in ["餐廳", "小吃", "熟食", "麵店", "咖啡", "飲料", "火鍋", "早午餐"])
+            if any(kw.lower() in cat.lower() for kw in NON_FOOD_NAME_KEYWORDS) 
+            and not any(f in cat for f in ["餐廳", "小吃", "熟食", "麵店", "咖啡", "飲料", "火鍋", "早午餐"])
         ]
 
         st.markdown("---")
@@ -243,14 +243,15 @@ with tab3:
 
                     c_name_col = find_column(df_crm, ["account name", "company", "account", "name", "title"])
                     c_addr_col = find_column(df_crm, ["street", "address", "地址"])
+                    c_grid_col = find_column(df_crm, ["grid", "sf_id", "salesforce id", "account id"])
 
-                    crm_pairs = []
+                    crm_tuples = []
                     if c_name_col and c_addr_col:
                         c_names = [clean_text(x) for x in df_crm[c_name_col].fillna("")]
                         c_addrs = [clean_text(x) for x in df_crm[c_addr_col].fillna("")]
-                        crm_pairs = list(zip(c_names, c_addrs))
+                        c_grids = [str(x).strip() if pd.notna(x) else "" for x in df_crm[c_grid_col]] if c_grid_col else [""]*len(c_names)
+                        crm_tuples = list(zip(c_names, c_addrs, c_grids))
 
-                    # 建立 GRID 字典映射
                     grid_to_rec = {}
                     name_to_rec = {}
 
@@ -274,6 +275,7 @@ with tab3:
 
                     final_statuses = []
                     matched_crm_names = []
+                    matched_sf_grids = []
                     google_cats = []
                     debug_reasons = []
 
@@ -285,12 +287,14 @@ with tab3:
                         l_name = clean_text(l_name_raw)
                         l_addr = clean_text(l_addr_raw)
 
-                        # 1. 硬過濾公司/B2B名稱
-                        if any(nk in l_name for nk in NON_FOOD_NAME_KEYWORDS):
+                        # 1. 硬過濾公司/B2B/非目標店名關鍵字
+                        hit_keyword = next((nk for nk in NON_FOOD_NAME_KEYWORDS if nk.lower() in l_name), None)
+                        if hit_keyword:
                             final_statuses.append("Wrong Target Group (WTG)")
                             matched_crm_names.append("")
+                            matched_sf_grids.append("")
                             google_cats.append("由店名攔截")
-                            debug_reasons.append("店名包含非餐飲/B2B關鍵字")
+                            debug_reasons.append(f"店名包含關鍵字 [{hit_keyword}]")
                             continue
 
                         # 2. 以 GRID 精準查找 Apify 紀錄
@@ -309,6 +313,7 @@ with tab3:
                         if "true" in is_closed_str or "closed" in is_closed_str or "1" == is_closed_str:
                             final_statuses.append("Permanently Closed")
                             matched_crm_names.append("")
+                            matched_sf_grids.append("")
                             debug_reasons.append("Google 地圖標示歇業")
                             continue
 
@@ -316,17 +321,19 @@ with tab3:
                         if cat_str in selected_wtg_cats:
                             final_statuses.append("Wrong Target Group (WTG)")
                             matched_crm_names.append("")
+                            matched_sf_grids.append("")
                             debug_reasons.append(f"Google 類別屬於選定的 WTG [{cat_str}]")
                             continue
 
-                        # 5. CRM 重複比對
+                        # 5. CRM 重複比對 (命中 P4 時抓取 Salesforce GRID)
                         best_status = "P1 - New Lead"
                         best_crm_name = ""
+                        best_sf_grid = ""
                         debug_msg = f"驗證通過 (Google類別: {cat_str or '未對應到，店名正常'})"
 
                         if l_name:
                             prefix = l_name[:2]
-                            for c_name, c_addr in crm_pairs:
+                            for c_name, c_addr, c_grid in crm_tuples:
                                 if not (c_name.startswith(prefix) or prefix in c_name):
                                     continue
                                 
@@ -338,23 +345,26 @@ with tab3:
                                     if addr_score >= 0.50 or addr_contains:
                                         best_status = "P4 - Duplicate"
                                         best_crm_name = c_name
+                                        best_sf_grid = c_grid
                                         debug_msg = f"命中 CRM 重複檔 ({c_name})"
                                         break
 
                         final_statuses.append(best_status)
                         matched_crm_names.append(best_crm_name)
+                        matched_sf_grids.append(best_sf_grid)
                         debug_reasons.append(debug_msg)
 
                     df_leads["Final Classification"] = final_statuses
                     df_leads["Google Category"] = google_cats
                     df_leads["Matched CRM Name"] = matched_crm_names
+                    df_leads["Matched Salesforce GRID"] = matched_sf_grids
                     df_leads["判定依據說明"] = debug_reasons
 
                     counts = df_leads["Final Classification"].value_counts().to_dict()
                     st.write("### 📊 最終分類統計結果：")
                     st.write(counts)
 
-                    st.dataframe(df_leads[["Final Classification", l_name_col, "Google Category", "Matched CRM Name", "判定依據說明"]].head(30))
+                    st.dataframe(df_leads[["Final Classification", l_name_col, "Google Category", "Matched CRM Name", "Matched Salesforce GRID", "判定依據說明"]].head(30))
 
                     csv_out = df_leads.to_csv(index=False).encode('utf-8-sig')
                     st.download_button("📥 下載最終分類報告 (CSV)", data=csv_out, file_name="final_leads_classified.csv", mime="text/csv")
@@ -384,6 +394,7 @@ with tab4:
             m_name_col = find_column(df_sf_m, ["account name", "company", "account", "name", "title"])
             t_addr_col = find_column(df_sf_t, ["street", "address", "地址"])
             m_addr_col = find_column(df_sf_m, ["street", "address", "地址"])
+            m_grid_col = find_column(df_sf_m, ["grid", "sf_id", "salesforce id", "account id"])
 
             if not t_name_col or not m_name_col:
                 st.error("❌ 找不到帳號名稱欄位，請檢查檔案標頭。")
@@ -392,10 +403,12 @@ with tab4:
                     with st.spinner("執行 SF 比對中..."):
                         m_names = [clean_text(x) for x in df_sf_m[m_name_col].fillna("")]
                         m_addrs = [clean_text(x) for x in df_sf_m[m_addr_col].fillna("")] if m_addr_col else [""]*len(m_names)
-                        m_pairs = list(zip(m_names, m_addrs))
+                        m_grids = [str(x).strip() if pd.notna(x) else "" for x in df_sf_m[m_grid_col]] if m_grid_col else [""]*len(m_names)
+                        m_tuples = list(zip(m_names, m_addrs, m_grids))
 
                         audit_results = []
                         matched_names = []
+                        matched_grids = []
 
                         for idx, r in df_sf_t.iterrows():
                             t_n_raw = str(r[t_name_col]) if pd.notna(r[t_name_col]) else ""
@@ -406,10 +419,11 @@ with tab4:
 
                             is_dup = False
                             matched_m_name = ""
+                            matched_m_grid = ""
 
                             if t_n:
                                 prefix = t_n[:2]
-                                for m_n, m_a in m_pairs:
+                                for m_n, m_a, m_g in m_tuples:
                                     if not (m_n.startswith(prefix) or prefix in m_n):
                                         continue
                                     
@@ -419,13 +433,16 @@ with tab4:
                                         if a_score >= 0.50 or not t_a:
                                             is_dup = True
                                             matched_m_name = m_n
+                                            matched_m_grid = m_g
                                             break
 
                             audit_results.append("Duplicate Account" if is_dup else "Clean Account")
                             matched_names.append(matched_m_name)
+                            matched_grids.append(matched_m_grid)
 
                         df_sf_t["Audit Result"] = audit_results
                         df_sf_t["Matched SF Master Name"] = matched_names
+                        df_sf_t["Matched Salesforce GRID"] = matched_grids
 
                         st.write("### 📊 SF 帳號審核結果：")
                         st.write(df_sf_t["Audit Result"].value_counts().to_dict())
@@ -513,10 +530,10 @@ with tab6:
       3. 歷史 CRM 主檔案 (`bq-results-...csv`)
       4. 勾選/微調要攔截的 **WTG 類別清單**，點擊 **`▶ 開始分類比對`** 並下載最終 CSV。
     * **目的與原理**：
-      * **第一層（公司/B2B 硬過濾）**：自動攔截店名帶有 `貿易`、`生技`、`股份有限公司`、`博物館`、`工場` 等非餐飲/B2B 關鍵字。
+      * **第一層（硬關鍵字攔截）**：自動攔截店名帶有 59 個特定關鍵字（如：`有限公司`、`裝修`、`除毛`、`休閒農場`、`太陽堂`、`復興航棧`、`馥漫` 等非目標/特定品牌連鎖）。
       * **第二層（Google 類別動態攔截）**：比對 Google 官方類別，自動剔除 `餅店`、`烘焙用具店`、`製造商`、`旅遊景點`、`乳酪雪糕店` 等非目標客群 (WTG)。
       * **第三層（歇業判讀）**：自動抓出 Google 上標示為永久歇業 (Permanently Closed) 的店家。
-      * **第四層（CRM 店名+地址雙重排重）**：比對歷史 CRM 檔案，自動標記既有重複客戶 (P4 - Duplicate)，避免業務重複開發。
+      * **第四層（CRM 店名+地址雙重排重）**：比對歷史 CRM 檔案，自動標記既有重複客戶 (P4 - Duplicate)，並自動帶出 Salesforce 庫中的 `GRID`。
 
     ---
 
@@ -525,7 +542,7 @@ with tab6:
     | 狀態標籤 | 意義與說明 | 後續處理方式 |
     | :--- | :--- | :--- |
     | **`P1 - New Lead`** | 驗證通過的合格餐飲新店家，無 CRM 重複紀錄。 | **直接發配給業務進行開發** |
-    | **`Wrong Target Group (WTG)`** | 非目標店家（如：生技、貿易公司、觀光工廠、純餅店/伴手禮）。 | 系統自動封存/排除 |
+    | **`Wrong Target Group (WTG)`** | 非目標店家（如：生技、貿易公司、觀光工廠、純餅店/伴手禮/特定硬關鍵字店家）。 | 系統自動封存/排除 |
     | **`Permanently Closed`** | Google 地圖標示已歇業。 | 系統自動封存/排除 |
-    | **`P4 - Duplicate`** | CRM 中已存在該店家（相似度高於 60% 且地址吻合）。 | 排除，防止業務撞單 |
+    | **`P4 - Duplicate`** | CRM 中已存在該店家（附上 Salesforce 的既有 GRID/ID）。 | 排除，防止業務撞單 |
     """)
