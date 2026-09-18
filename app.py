@@ -25,7 +25,7 @@ def check_password():
 if not check_password():
     st.stop()
 
-# 店名/公司硬攔截關鍵字 (WTG) - 完整擴充 59 個指定關鍵字
+# 店名/公司硬攔截關鍵字 (WTG) - 59 個指定關鍵字
 NON_FOOD_NAME_KEYWORDS = [
     "有限公司", "裝修", "設計", "工程", "除毛", "禮餅舖", "團購", "不鏽鋼", "餐飲設備", 
     "公園店", "食品行", "喜餅", "休閒池", "museum", "批發", "伴手禮", "松機", "食品廠", 
@@ -35,6 +35,14 @@ NON_FOOD_NAME_KEYWORDS = [
     "無人拉麵", "復興航棧", "書店", "電競", "草莓園", "旅行社", "大飯店", "基金會", 
     "糕餅", "紀念中心", "休息站", "服務區", "活動中心", "訓練中心", "社團法人", "馥漫",
     "貿易", "生技", "股份有限公司", "博物館", "工場", "觀光工廠", "設備", "生鮮專賣", "器材", "實業"
+]
+
+# Google 類別 (Category) 預設攔截關鍵字 - 含超級市場、餅店、健康食品等
+WTG_CATEGORY_KEYWORDS = [
+    "超級市場", "餅店", "糕餅", "健康食品", "商店", "批發", "製造商", "傳統市場", "便利店", 
+    "專賣店", "百貨", "冷凍食品", "生鮮", "有機", "補習班", "酒店", "維修", "設備", "景點",
+    "俱樂部", "服務", "供應商", "音響", "書", "展覽", "藝廊", "營地", "肉檔", "肉鋪", 
+    "內衣", "堅果", "乳酪雪糕", "禮盒", "果乾", "車"
 ]
 
 def clean_text(text):
@@ -57,15 +65,15 @@ def safe_load_csv(uploaded_file):
         return pd.read_excel(uploaded_file)
 
 def find_column(df, possible_names):
-    # 優先尋找完全匹配的名稱（如 GRID）
+    # 優先尋找完全匹配的名稱（如 GRID 或 categoryName）
     for target in possible_names:
         for col in df.columns:
             if col.strip().lower() == target.lower():
                 return col
-    # 次要尋找包含關係，但自動排斥 businessProfileId / placeId 等干擾欄位
+    # 次要尋找包含關係，但自動排斥 businessProfileId / additionalInfo 等干擾欄位
     for col in df.columns:
         col_clean = str(col).strip().lower()
-        if "businessprofileid" in col_clean or "placeid" in col_clean:
+        if "businessprofileid" in col_clean or "placeid" in col_clean or "additionalinfo" in col_clean:
             continue
         for target in possible_names:
             if target.lower() in col_clean:
@@ -76,7 +84,6 @@ def find_column(df, possible_names):
 st.set_page_config(page_title="Sales Ops Suite", layout="wide")
 st.title("Sales Ops · Data Quality Suite — Taiwan")
 
-# 整合所有 6 個頁籤
 tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
     "🔗 Step 1: 生成爬蟲網址", 
     "📌 Step 2: 黏合 GRID 識別碼", 
@@ -111,7 +118,6 @@ with tab1:
 
                 df_url["url"] = df_url.apply(make_url, axis=1)
                 
-                # 若檔案原本無 GRID，自動編發 GRID 流水號
                 grid_col = find_column(df_url, ["grid"])
                 if not grid_col or grid_col not in df_url.columns:
                     df_url["GRID"] = [f"GRID_{i+1:06d}" for i in range(len(df_url))]
@@ -182,7 +188,7 @@ with tab2:
             df_apify["GRID"] = df_apify.apply(match_row_grid_robust, axis=1)
 
             st.success("✅ 識別碼（GRID/ID）已 100% 精準對接黏回！")
-            st.dataframe(df_apify[["GRID", find_column(df_apify, ["title", "name"]), find_column(df_apify, ["category", "cat"])]].head(10))
+            st.dataframe(df_apify[["GRID", find_column(df_apify, ["title", "name"]), find_column(df_apify, ["categoryname", "categories/0"])]].head(10))
             
             csv_grid_out = df_apify.to_csv(index=False).encode('utf-8-sig')
             st.download_button("📥 下載含 GRID 的 Apify 結果 CSV (apify_results_with_grid.csv)", data=csv_grid_out, file_name="apify_results_with_grid.csv", mime="text/csv")
@@ -212,15 +218,16 @@ with tab3:
             df_leads["GRID"] = [f"GRID_{i+1:06d}" for i in range(len(df_leads))]
             l_grid_col = "GRID"
 
-        a_cat_col = find_column(df_apify, ["categoryname", "categories/0", "primarycategory", "category"])
+        # 強效尋找正確的類別欄位 (優先 categoryName)
+        a_cat_col = find_column(df_apify, ["categoryname", "categories/0", "primarycategory"])
         all_detected_cats = []
         if a_cat_col and a_cat_col in df_apify.columns:
             all_detected_cats = sorted([str(c).strip() for c in df_apify[a_cat_col].dropna().unique() if str(c).strip()])
 
+        # 自動強效勾選 WTG 類別 (含超級市場、餅店、健康食品等)
         default_selected_wtg = [
             cat for cat in all_detected_cats 
-            if any(kw.lower() in cat.lower() for kw in NON_FOOD_NAME_KEYWORDS) 
-            and not any(f in cat for f in ["餐廳", "小吃", "熟食", "麵店", "咖啡", "飲料", "火鍋", "早午餐"])
+            if any(kw.lower() in cat.lower() for kw in (NON_FOOD_NAME_KEYWORDS + WTG_CATEGORY_KEYWORDS))
         ]
 
         st.markdown("---")
@@ -520,7 +527,7 @@ with tab6:
       2. 前往 **Step 2** 頁籤：左邊框框上傳 `apify_input_urls.csv`，右邊框框上傳 Apify 抓回來的原始結果 CSV 大檔。
       3. 點擊下載黏合好的 **`apify_results_with_grid.csv`**。
     * **目的與原理**：
-      * **獲取 Google 官方實體資料**：由爬蟲自動抓取 Google 地圖上記錄的 **「官方地圖類別 (Category)」**（如：`餅店`、`製造商`、`乳酪雪糕店`、`餐廳`）以及 **「營業狀態」**（是否歇業）。
+      * **獲取 Google 官方實體資料**：由爬蟲自動抓取 Google 地圖上記錄的 **「官方地圖類別 (Category)」**（如：`餅店`、`超級市場`、`健康食品店`、`餐廳`）以及 **「營業狀態」**（是否歇業）。
       * **建立 1:1 精準映射**：透過 URL 鍵值對接，把爬蟲結果與原始 Leads 的 `GRID` 強制綁定，消除任何跨列錯位的可能。
 
     #### 3️⃣ 步驟 3：一鍵動態過濾與 CRM 排重 (`Step 3: 分類過濾與 CRM 排重`)
@@ -531,7 +538,7 @@ with tab6:
       4. 勾選/微調要攔截的 **WTG 類別清單**，點擊 **`▶ 開始分類比對`** 並下載最終 CSV。
     * **目的與原理**：
       * **第一層（硬關鍵字攔截）**：自動攔截店名帶有 59 個特定關鍵字（如：`有限公司`、`裝修`、`除毛`、`休閒農場`、`太陽堂`、`復興航棧`、`馥漫` 等非目標/特定品牌連鎖）。
-      * **第二層（Google 類別動態攔截）**：比對 Google 官方類別，自動剔除 `餅店`、`烘焙用具店`、`製造商`、`旅遊景點`、`乳酪雪糕店` 等非目標客群 (WTG)。
+      * **第二層（Google 類別動態攔截）**：比對 Google 官方類別，自動剔除 `超級市場`、`餅店`、`健康食品店`、`烘焙用具店`、`製造商`、`旅遊景點` 等非目標客群 (WTG)。
       * **第三層（歇業判讀）**：自動抓出 Google 上標示為永久歇業 (Permanently Closed) 的店家。
       * **第四層（CRM 店名+地址雙重排重）**：比對歷史 CRM 檔案，自動標記既有重複客戶 (P4 - Duplicate)，並自動帶出 Salesforce 庫中的 `GRID`。
 
@@ -542,7 +549,7 @@ with tab6:
     | 狀態標籤 | 意義與說明 | 後續處理方式 |
     | :--- | :--- | :--- |
     | **`P1 - New Lead`** | 驗證通過的合格餐飲新店家，無 CRM 重複紀錄。 | **直接發配給業務進行開發** |
-    | **`Wrong Target Group (WTG)`** | 非目標店家（如：生技、貿易公司、觀光工廠、純餅店/伴手禮/特定硬關鍵字店家）。 | 系統自動封存/排除 |
+    | **`Wrong Target Group (WTG)`** | 非目標店家（如：超級市場、餅店、健康食品店、生技、觀光工廠等）。 | 系統自動封存/排除 |
     | **`Permanently Closed`** | Google 地圖標示已歇業。 | 系統自動封存/排除 |
     | **`P4 - Duplicate`** | CRM 中已存在該店家（附上 Salesforce 的既有 GRID/ID）。 | 排除，防止業務撞單 |
     """)
