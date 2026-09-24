@@ -37,13 +37,16 @@ NON_FOOD_NAME_KEYWORDS = [
     "貿易", "生技", "股份有限公司", "博物館", "工場", "觀光工廠", "設備", "生鮮專賣", "器材", "實業"
 ]
 
-# Google 類別 (Category) 預設攔截關鍵字 - 含超級市場、餅店、健康食品等
+# Google 類別 (Category) 預設攔截關鍵字
 WTG_CATEGORY_KEYWORDS = [
     "超級市場", "餅店", "糕餅", "健康食品", "商店", "批發", "製造商", "傳統市場", "便利店", 
     "專賣店", "百貨", "冷凍食品", "生鮮", "有機", "補習班", "酒店", "維修", "設備", "景點",
     "俱樂部", "服務", "供應商", "音響", "書", "展覽", "藝廊", "營地", "肉檔", "肉鋪", 
     "內衣", "堅果", "乳酪雪糕", "禮盒", "果乾", "車"
 ]
+
+# Salesforce CRM 需忽略的無效狀態 (Terminated / Win Back Failed)
+EXCLUDED_SF_STATUSES = ["terminated", "terminated<6m", "win back failed", "winback failed"]
 
 def clean_text(text):
     if not text or pd.isna(text): return ""
@@ -65,12 +68,10 @@ def safe_load_csv(uploaded_file):
         return pd.read_excel(uploaded_file)
 
 def find_column(df, possible_names):
-    # 優先尋找完全匹配的名稱（如 GRID 或 categoryName）
     for target in possible_names:
         for col in df.columns:
             if col.strip().lower() == target.lower():
                 return col
-    # 次要尋找包含關係，但自動排斥 businessProfileId / additionalInfo 等干擾欄位
     for col in df.columns:
         col_clean = str(col).strip().lower()
         if "businessprofileid" in col_clean or "placeid" in col_clean or "additionalinfo" in col_clean:
@@ -84,17 +85,110 @@ def find_column(df, possible_names):
 st.set_page_config(page_title="Sales Ops Suite", layout="wide")
 st.title("Sales Ops · Data Quality Suite — Taiwan")
 
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+# 整合頁籤
+tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+    "⚡ SF 快速排重 (免 Apify)",
     "🔗 Step 1: 生成爬蟲網址", 
     "📌 Step 2: 黏合 GRID 識別碼", 
-    "📊 Step 3: 分類過濾與 CRM 排重",
+    "📊 Step 3: 完整過濾與 CRM 排重",
     "🏢 SF Account Audit",
     "📋 KPI Sample Checker",
     "📖 How to Use (操作指南)"
 ])
 
-# ── TAB 1: Step 1 · Generate Apify URLs ──────────────────────────
+# ── TAB 1: ⚡ SF 快速排重 (免 Apify) ───────────────────────────
 with tab1:
+    st.subheader("⚡ SF 快速排重 (免爬蟲 · 直通比對)")
+    st.caption("直接上傳 Raw Leads 與 Salesforce All Accounts，1 秒自動排出 P4 - Duplicate，自動過濾 Terminated / Win Back Failed 狀態。")
+
+    col_q1, col_q2 = st.columns(2)
+    with col_q1:
+        q_leads_up = st.file_uploader("1. 上傳 Raw Leads 檔 (.csv / .xlsx)", type=["xlsx","xls","csv"], key="q_leads")
+    with col_q2:
+        q_crm_up = st.file_uploader("2. 上傳 CRM All Accounts 大檔 (.csv / .xlsx)", type=["xlsx","xls","csv"], key="q_crm")
+
+    if q_leads_up and q_crm_up:
+        try:
+            df_q_leads = safe_load_csv(q_leads_up)
+            df_q_crm = safe_load_csv(q_crm_up)
+
+            st.success(f"✅ 成功載入：Raw 名單 ({len(df_q_leads)} 筆) | CRM 庫 ({len(df_q_crm)} 筆)")
+
+            l_name_col = find_column(df_q_leads, ["company / account", "company", "account", "name", "title"])
+            l_addr_col = find_column(df_q_leads, ["street", "address", "地址"])
+
+            c_name_col = find_column(df_q_crm, ["account name", "company", "account", "name", "title"])
+            c_addr_col = find_column(df_q_crm, ["street", "address", "地址"])
+            c_grid_col = find_column(df_q_crm, ["grid", "sf_id", "salesforce id", "account id"])
+            c_status_col = find_column(df_q_crm, ["status", "account_status", "stage"])
+
+            if not l_name_col or not c_name_col:
+                st.error("❌ 找不到店家名稱欄位，請檢查檔案標頭。")
+            else:
+                if st.button("▶ 執行 SF 快速排重 (Run Fast Check)", type="primary"):
+                    with st.spinner("秒速比對中..."):
+                        c_names = [clean_text(x) for x in df_q_crm[c_name_col].fillna("")]
+                        c_addrs = [clean_text(x) for x in df_q_crm[c_addr_col].fillna("")] if c_addr_col else [""]*len(c_names)
+                        c_grids = [str(x).strip() if pd.notna(x) else "" for x in df_q_crm[c_grid_col]] if c_grid_col else [""]*len(c_names)
+                        c_statuses = [clean_text(x) for x in df_q_crm[c_status_col].fillna("")] if c_status_col else [""]*len(c_names)
+
+                        crm_tuples = list(zip(c_names, c_addrs, c_grids, c_statuses))
+
+                        final_statuses = []
+                        matched_crm_names = []
+                        matched_sf_grids = []
+
+                        for idx, l_row in df_q_leads.iterrows():
+                            l_name_raw = str(l_row[l_name_col]).strip() if pd.notna(l_row[l_name_col]) else ""
+                            l_addr_raw = str(l_row[l_addr_col]).strip() if l_addr_col and pd.notna(l_row[l_addr_col]) else ""
+
+                            l_name = clean_text(l_name_raw)
+                            l_addr = clean_text(l_addr_raw)
+
+                            best_status = "P1 - New Lead"
+                            best_crm_name = ""
+                            best_sf_grid = ""
+
+                            if l_name:
+                                prefix = l_name[:2]
+                                for c_name, c_addr, c_grid, c_status in crm_tuples:
+                                    if not (c_name.startswith(prefix) or prefix in c_name):
+                                        continue
+                                    
+                                    # 過濾排除 Terminated 與 Win Back failed
+                                    if any(ex_st in c_status for ex_st in EXCLUDED_SF_STATUSES):
+                                        continue
+
+                                    name_score = SequenceMatcher(None, l_name, c_name).ratio()
+                                    if name_score >= 0.60:
+                                        addr_score = SequenceMatcher(None, l_addr, c_addr).ratio() if (l_addr and c_addr) else 0.0
+                                        addr_contains = (l_addr in c_addr or c_addr in l_addr) if len(l_addr) > 4 and len(c_addr) > 4 else False
+
+                                        if addr_score >= 0.50 or addr_contains or not l_addr:
+                                            best_status = "P4 - Duplicate"
+                                            best_crm_name = c_name
+                                            best_sf_grid = c_grid
+                                            break
+
+                            final_statuses.append(best_status)
+                            matched_crm_names.append(best_crm_name)
+                            matched_sf_grids.append(best_sf_grid)
+
+                        df_q_leads["CRM Duplicate Status"] = final_statuses
+                        df_q_leads["Matched CRM Name"] = matched_crm_names
+                        df_q_leads["Matched Salesforce GRID"] = matched_sf_grids
+
+                        st.write("### 📊 快速排重統計結果：")
+                        st.write(df_q_leads["CRM Duplicate Status"].value_counts().to_dict())
+                        st.dataframe(df_q_leads[["CRM Duplicate Status", l_name_col, "Matched CRM Name", "Matched Salesforce GRID"]].head(30))
+
+                        q_csv_out = df_q_leads.to_csv(index=False).encode('utf-8-sig')
+                        st.download_button("📥 下載快速排重報告 (CSV)", data=q_csv_out, file_name="sf_fast_dedup_result.csv", mime="text/csv")
+        except Exception as e:
+            st.error(f"排重失敗: {str(e)}")
+
+# ── TAB 2: Step 1 · Generate Apify URLs ──────────────────────────
+with tab2:
     st.subheader("🔗 Step 1 · 生成帶有 GRID 識別碼的 Google 地圖搜尋網址")
     st.caption("自動將店名與地址組裝為 Google 地圖 URL，並編發獨一無二的 GRID 流水號。")
 
@@ -132,8 +226,8 @@ with tab1:
         except Exception as e:
             st.error(f"處理失敗: {str(e)}")
 
-# ── TAB 2: Step 2 · Re-attach GRID to Apify Export ────────────────
-with tab2:
+# ── TAB 3: Step 2 · Re-attach GRID to Apify Export ────────────────
+with tab3:
     st.subheader("📌 Step 2 · 黏合 GRID 識別碼至 Apify 爬蟲結果")
     st.caption("將從 Apify 下載的原始爬蟲結果大檔，精準黏回 GRID 識別碼，防範資料錯位。")
 
@@ -195,10 +289,10 @@ with tab2:
         except Exception as e:
             st.error(f"錯誤: {str(e)}")
 
-# ── TAB 3: Step 3 · Classify Leads & Filter ───────────────────────
-with tab3:
+# ── TAB 4: Step 3 · Classify Leads & Filter ───────────────────────
+with tab4:
     st.subheader("📊 Step 3 · 全 Google 地圖類別動態過濾與 CRM 比對")
-    st.caption("透過 GRID 進行 100% 精準對接，自動排除 WTG 與歇業，命中 P4 - Duplicate 時附上 Salesforce GRID。")
+    st.caption("透過 GRID 進行 100% 精準對接，自動排除 WTG 與歇業，並跳過 Terminated / Win Back Failed 狀態。")
 
     c1, c2, c3 = st.columns(3)
     with c1:
@@ -218,13 +312,11 @@ with tab3:
             df_leads["GRID"] = [f"GRID_{i+1:06d}" for i in range(len(df_leads))]
             l_grid_col = "GRID"
 
-        # 強效尋找正確的類別欄位 (優先 categoryName)
         a_cat_col = find_column(df_apify, ["categoryname", "categories/0", "primarycategory"])
         all_detected_cats = []
         if a_cat_col and a_cat_col in df_apify.columns:
             all_detected_cats = sorted([str(c).strip() for c in df_apify[a_cat_col].dropna().unique() if str(c).strip()])
 
-        # 自動強效勾選 WTG 類別 (含超級市場、餅店、健康食品等)
         default_selected_wtg = [
             cat for cat in all_detected_cats 
             if any(kw.lower() in cat.lower() for kw in (NON_FOOD_NAME_KEYWORDS + WTG_CATEGORY_KEYWORDS))
@@ -251,13 +343,15 @@ with tab3:
                     c_name_col = find_column(df_crm, ["account name", "company", "account", "name", "title"])
                     c_addr_col = find_column(df_crm, ["street", "address", "地址"])
                     c_grid_col = find_column(df_crm, ["grid", "sf_id", "salesforce id", "account id"])
+                    c_status_col = find_column(df_crm, ["status", "account_status", "stage"])
 
                     crm_tuples = []
                     if c_name_col and c_addr_col:
                         c_names = [clean_text(x) for x in df_crm[c_name_col].fillna("")]
                         c_addrs = [clean_text(x) for x in df_crm[c_addr_col].fillna("")]
                         c_grids = [str(x).strip() if pd.notna(x) else "" for x in df_crm[c_grid_col]] if c_grid_col else [""]*len(c_names)
-                        crm_tuples = list(zip(c_names, c_addrs, c_grids))
+                        c_statuses = [clean_text(x) for x in df_crm[c_status_col].fillna("")] if c_status_col else [""]*len(c_names)
+                        crm_tuples = list(zip(c_names, c_addrs, c_grids, c_statuses))
 
                     grid_to_rec = {}
                     name_to_rec = {}
@@ -332,7 +426,7 @@ with tab3:
                             debug_reasons.append(f"Google 類別屬於選定的 WTG [{cat_str}]")
                             continue
 
-                        # 5. CRM 重複比對 (命中 P4 時抓取 Salesforce GRID)
+                        # 5. CRM 重複比對 (跳過 Terminated / Win Back Failed)
                         best_status = "P1 - New Lead"
                         best_crm_name = ""
                         best_sf_grid = ""
@@ -340,10 +434,14 @@ with tab3:
 
                         if l_name:
                             prefix = l_name[:2]
-                            for c_name, c_addr, c_grid in crm_tuples:
+                            for c_name, c_addr, c_grid, c_status in crm_tuples:
                                 if not (c_name.startswith(prefix) or prefix in c_name):
                                     continue
                                 
+                                # 過濾排除 Terminated 與 Win Back failed 狀態
+                                if any(ex_st in c_status for ex_st in EXCLUDED_SF_STATUSES):
+                                    continue
+
                                 name_score = SequenceMatcher(None, l_name, c_name).ratio()
                                 if name_score >= 0.60:
                                     addr_score = SequenceMatcher(None, l_addr, c_addr).ratio() if (l_addr and c_addr) else 0.0
@@ -379,8 +477,8 @@ with tab3:
                 except Exception as e:
                     st.error(f"分類過程發生錯誤: {str(e)}")
 
-# ── TAB 4: SF Account Audit ──────────────────────────────────────
-with tab4:
+# ── TAB 5: SF Account Audit ──────────────────────────────────────
+with tab5:
     st.subheader("🏢 Salesforce Account Audit (SF 帳號與 duplicates 比對與審核)")
     st.caption("支援獨立上傳待審核的 Salesforce 帳號清單與歷史庫進行相似度比對。")
 
@@ -460,8 +558,8 @@ with tab4:
         except Exception as e:
             st.error(f"SF 審核失敗: {str(e)}")
 
-# ── TAB 5: KPI Sample Checker ────────────────────────────────────
-with tab5:
+# ── TAB 6: KPI Sample Checker ────────────────────────────────────
+with tab6:
     st.subheader("📋 KPI Sample Checker (稽核隨機抽樣工具)")
     st.caption("支援上傳審核完成的名單，根據指定的抽樣比例或數量隨機抽取樣本，便於團隊抽查 KPI。")
 
@@ -497,15 +595,25 @@ with tab5:
         except Exception as e:
             st.error(f"抽樣過程發生錯誤: {str(e)}")
 
-# ── TAB 6: How to Use (完整 SOP 說明頁面) ─────────────────────────
-with tab6:
+# ── TAB 7: How to Use (完整 SOP 說明頁面) ─────────────────────────
+with tab7:
     st.subheader("📖 Raw Leads 自動化審核 SOP 與操作指南")
     st.markdown("""
     本系統旨在協助 Sales Ops 自動排除 **「非餐飲店家 (WTG)」**、**「已歇業店家」** 與 **「CRM 既有重複名單 (P4)」**，產出乾淨可供業務直接開發的 P1 名單。
 
     ---
 
-    ### 📋 餐廳 Leads 自動化審核三步驟
+    ### ⚡ 兩種審核情境選擇
+
+    * **情境 1：只做 CRM 重複排重 (最快速，不用 Apify)**
+      * 開啟 **`⚡ SF 快速排重 (免 Apify)`** 頁籤，直接上傳 Raw Leads 與 CRM 大檔，1 秒完成比對。
+      * 自動跳過 `Terminated` / `Win Back failed` 帳號。
+    * **情境 2：完整 3 步驟審核 (含 Google 地圖類別與歇業判讀)**
+      * 依照 `Step 1` $\rightarrow$ `Step 2` $\rightarrow$ `Step 3` 順序操作。
+
+    ---
+
+    ### 📋 餐廳 Leads 完整自動化審核三步驟
 
     ```
      步驟 1 (產生爬蟲網址)       步驟 2 (Apify 爬蟲與識別碼黏合)       步驟 3 (一鍵動態過濾與 CRM 比對)
@@ -517,30 +625,14 @@ with tab6:
 
     #### 1️⃣ 步驟 1：產生帶有 GRID 識別碼的 Google 地圖搜尋網址 (`Step 1: 生成爬蟲網址`)
     * **操作方式**：將未審核的 Raw Leads 檔（含店名與地址）上傳至 **Step 1** 頁籤，點擊下載產出的 `apify_input_urls.csv`。
-    * **目的與原理**：
-      * **組裝搜尋語法**：自動將「店名 + 地址」組造成 Google 地圖能精準搜尋的 URL。
-      * **編發身份證字號 (`GRID`)**：為每一筆名單編上獨一無二的流水號（如 `GRID_000001`）。因為爬蟲抓回來的結果往往會**亂序**，有了 `GRID` 才能確保資料最後能 100% 精準對回原始名單。
 
     #### 2️⃣ 步驟 2：執行 Apify 爬蟲並黏回 `GRID` 識別碼 (`Step 2: 黏合 GRID 識別碼`)
     * **操作方式**：
       1. 將 `apify_input_urls.csv` 裡面的 `url` 欄位貼入 **Apify (Google Maps Extractor)** 執行爬蟲，下載抓好的原始結果 CSV 大檔。
-      2. 前往 **Step 2** 頁籤：左邊框框上傳 `apify_input_urls.csv`，右邊框框上傳 Apify 抓回來的原始結果 CSV 大檔。
-      3. 點擊下載黏合好的 **`apify_results_with_grid.csv`**。
-    * **目的與原理**：
-      * **獲取 Google 官方實體資料**：由爬蟲自動抓取 Google 地圖上記錄的 **「官方地圖類別 (Category)」**（如：`餅店`、`超級市場`、`健康食品店`、`餐廳`）以及 **「營業狀態」**（是否歇業）。
-      * **建立 1:1 精準映射**：透過 URL 鍵值對接，把爬蟲結果與原始 Leads 的 `GRID` 強制綁定，消除任何跨列錯位的可能。
+      2. 前往 **Step 2** 頁籤：左邊上傳 `apify_input_urls.csv`，右邊上傳 Apify 抓回來的原始結果 CSV 大檔，下載黏合好的 **`apify_results_with_grid.csv`**。
 
     #### 3️⃣ 步驟 3：一鍵動態過濾與 CRM 排重 (`Step 3: 分類過濾與 CRM 排重`)
-    * **操作方式**：前往 **Step 3** 頁籤，依次上傳三個檔案：
-      1. 原始 Raw Leads 檔 (`unverified_leads.csv`)
-      2. Step 2 下載黏好 GRID 的 Apify 結果檔 (`apify_results_with_grid.csv`)
-      3. 歷史 CRM 主檔案 (`bq-results-...csv`)
-      4. 勾選/微調要攔截的 **WTG 類別清單**，點擊 **`▶ 開始分類比對`** 並下載最終 CSV。
-    * **目的與原理**：
-      * **第一層（硬關鍵字攔截）**：自動攔截店名帶有 59 個特定關鍵字（如：`有限公司`、`裝修`、`除毛`、`休閒農場`、`太陽堂`、`復興航棧`、`馥漫` 等非目標/特定品牌連鎖）。
-      * **第二層（Google 類別動態攔截）**：比對 Google 官方類別，自動剔除 `超級市場`、`餅店`、`健康食品店`、`烘焙用具店`、`製造商`、`旅遊景點` 等非目標客群 (WTG)。
-      * **第三層（歇業判讀）**：自動抓出 Google 上標示為永久歇業 (Permanently Closed) 的店家。
-      * **第四層（CRM 店名+地址雙重排重）**：比對歷史 CRM 檔案，自動標記既有重複客戶 (P4 - Duplicate)，並自動帶出 Salesforce 庫中的 `GRID`。
+    * **操作方式**：前往 **Step 3** 頁籤，依次上傳三個檔案（Leads 檔、Step 2 的 Apify 檔、CRM 大檔），點擊 **`▶ 開始分類比對`**。
 
     ---
 
@@ -548,8 +640,8 @@ with tab6:
 
     | 狀態標籤 | 意義與說明 | 後續處理方式 |
     | :--- | :--- | :--- |
-    | **`P1 - New Lead`** | 驗證通過的合格餐飲新店家，無 CRM 重複紀錄。 | **直接發配給業務進行開發** |
+    | **`P1 - New Lead`** | 驗證通過的合格餐飲新店家，無 CRM 重複紀錄（或比對到的舊帳號為 Terminated/Win Back Failed）。 | **直接發配給業務進行開發** |
     | **`Wrong Target Group (WTG)`** | 非目標店家（如：超級市場、餅店、健康食品店、生技、觀光工廠等）。 | 系統自動封存/排除 |
     | **`Permanently Closed`** | Google 地圖標示已歇業。 | 系統自動封存/排除 |
-    | **`P4 - Duplicate`** | CRM 中已存在該店家（附上 Salesforce 的既有 GRID/ID）。 | 排除，防止業務撞單 |
+    | **`P4 - Duplicate`** | CRM 中已存在該有效店家（附上 Salesforce 的既有 GRID/ID）。 | 排除，防止業務撞單 |
     """)
