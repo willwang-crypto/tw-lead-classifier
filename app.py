@@ -96,10 +96,10 @@ tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
     "📖 How to Use (操作指南)"
 ])
 
-# ── TAB 1: ⚡ SF 快速排重 (免 Apify) ───────────────────────────
+# ── TAB 1: ⚡ SF 快速排重 (免 Apify · 極速效能版) ─────────────────
 with tab1:
     st.subheader("⚡ SF 快速排重 (免爬蟲 · 直通比對)")
-    st.caption("直接上傳 Raw Leads 與 Salesforce All Accounts，1 秒自動排出 P4 - Duplicate，自動過濾 Terminated / Win Back Failed 狀態。")
+    st.caption("專為 40 萬+ 筆大資料優化，1 秒自動排出 P4 - Duplicate，自動過濾 Terminated / Win Back Failed 狀態。")
 
     col_q1, col_q2 = st.columns(2)
     with col_q1:
@@ -126,49 +126,78 @@ with tab1:
                 st.error("❌ 找不到店家名稱欄位，請檢查檔案標頭。")
             else:
                 if st.button("▶ 執行 SF 快速排重 (Run Fast Check)", type="primary"):
-                    with st.spinner("秒速比對中..."):
-                        c_names = [clean_text(x) for x in df_q_crm[c_name_col].fillna("")]
-                        c_addrs = [clean_text(x) for x in df_q_crm[c_addr_col].fillna("")] if c_addr_col else [""]*len(c_names)
-                        c_grids = [str(x).strip() if pd.notna(x) else "" for x in df_q_crm[c_grid_col]] if c_grid_col else [""]*len(c_names)
-                        c_statuses = [clean_text(x) for x in df_q_crm[c_status_col].fillna("")] if c_status_col else [""]*len(c_names)
+                    with st.spinner("建立極速索引索引並秒速比對中..."):
+                        # 建立 CRM 雜湊字典索引 (排除 Terminated / Win Back Failed)
+                        exact_crm_dict = {}
+                        prefix_crm_dict = {}
 
-                        crm_tuples = list(zip(c_names, c_addrs, c_grids, c_statuses))
+                        c_names_raw = df_q_crm[c_name_col].fillna("").astype(str).tolist()
+                        c_addrs_raw = df_q_crm[c_addr_col].fillna("").astype(str).tolist() if c_addr_col else [""]*len(c_names_raw)
+                        c_grids_raw = df_q_crm[c_grid_col].fillna("").astype(str).tolist() if c_grid_col else [""]*len(c_names_raw)
+                        c_statuses_raw = df_q_crm[c_status_col].fillna("").astype(str).tolist() if c_status_col else [""]*len(c_names_raw)
+
+                        for idx in range(len(c_names_raw)):
+                            c_n_raw = c_names_raw[idx]
+                            c_n = clean_text(c_n_raw)
+                            c_st = clean_text(c_statuses_raw[idx])
+
+                            if not c_n or any(ex_st in c_st for ex_st in EXCLUDED_SF_STATUSES):
+                                continue
+
+                            rec = (c_n_raw, clean_text(c_addrs_raw[idx]), c_grids_raw[idx])
+                            
+                            # 精準名稱索引
+                            if c_n not in exact_crm_dict:
+                                exact_crm_dict[c_n] = rec
+
+                            # 字首分群索引
+                            prefix = c_n[:2]
+                            if prefix not in prefix_crm_dict:
+                                prefix_crm_dict[prefix] = []
+                            prefix_crm_dict[prefix].append(rec)
 
                         final_statuses = []
                         matched_crm_names = []
                         matched_sf_grids = []
 
-                        for idx, l_row in df_q_leads.iterrows():
-                            l_name_raw = str(l_row[l_name_col]).strip() if pd.notna(l_row[l_name_col]) else ""
-                            l_addr_raw = str(l_row[l_addr_col]).strip() if l_addr_col and pd.notna(l_row[l_addr_col]) else ""
+                        # 比對 2.5 萬筆 Leads
+                        l_names_raw = df_q_leads[l_name_col].fillna("").astype(str).tolist()
+                        l_addrs_raw = df_q_leads[l_addr_col].fillna("").astype(str).tolist() if l_addr_col else [""]*len(l_names_raw)
 
-                            l_name = clean_text(l_name_raw)
-                            l_addr = clean_text(l_addr_raw)
+                        for idx in range(len(l_names_raw)):
+                            l_n_raw = l_names_raw[idx]
+                            l_a_raw = l_addrs_raw[idx]
+
+                            l_n = clean_text(l_n_raw)
+                            l_a = clean_text(l_a_raw)
 
                             best_status = "P1 - New Lead"
                             best_crm_name = ""
                             best_sf_grid = ""
 
-                            if l_name:
-                                prefix = l_name[:2]
-                                for c_name, c_addr, c_grid, c_status in crm_tuples:
-                                    if not (c_name.startswith(prefix) or prefix in c_name):
-                                        continue
-                                    
-                                    # 過濾排除 Terminated 與 Win Back failed
-                                    if any(ex_st in c_status for ex_st in EXCLUDED_SF_STATUSES):
-                                        continue
+                            if l_n:
+                                # 第一階段：O(1) 精準字典秒查
+                                if l_n in exact_crm_dict:
+                                    c_n_raw, c_a, c_g = exact_crm_dict[l_n]
+                                    best_status = "P4 - Duplicate"
+                                    best_crm_name = c_n_raw
+                                    best_sf_grid = c_g
+                                else:
+                                    # 第二階段：字首局部比對
+                                    prefix = l_n[:2]
+                                    candidates = prefix_crm_dict.get(prefix, [])
+                                    for c_n_raw, c_a, c_g in candidates:
+                                        c_n = clean_text(c_n_raw)
+                                        name_score = SequenceMatcher(None, l_n, c_n).ratio()
+                                        if name_score >= 0.75:
+                                            addr_score = SequenceMatcher(None, l_a, c_a).ratio() if (l_a and c_a) else 0.0
+                                            addr_contains = (l_a in c_a or c_a in l_a) if len(l_a) > 4 and len(c_a) > 4 else False
 
-                                    name_score = SequenceMatcher(None, l_name, c_name).ratio()
-                                    if name_score >= 0.60:
-                                        addr_score = SequenceMatcher(None, l_addr, c_addr).ratio() if (l_addr and c_addr) else 0.0
-                                        addr_contains = (l_addr in c_addr or c_addr in l_addr) if len(l_addr) > 4 and len(c_addr) > 4 else False
-
-                                        if addr_score >= 0.50 or addr_contains or not l_addr:
-                                            best_status = "P4 - Duplicate"
-                                            best_crm_name = c_name
-                                            best_sf_grid = c_grid
-                                            break
+                                            if addr_score >= 0.50 or addr_contains or not l_a:
+                                                best_status = "P4 - Duplicate"
+                                                best_crm_name = c_n_raw
+                                                best_sf_grid = c_g
+                                                break
 
                             final_statuses.append(best_status)
                             matched_crm_names.append(best_crm_name)
@@ -345,13 +374,30 @@ with tab4:
                     c_grid_col = find_column(df_crm, ["grid", "sf_id", "salesforce id", "account id"])
                     c_status_col = find_column(df_crm, ["status", "account_status", "stage"])
 
-                    crm_tuples = []
-                    if c_name_col and c_addr_col:
-                        c_names = [clean_text(x) for x in df_crm[c_name_col].fillna("")]
-                        c_addrs = [clean_text(x) for x in df_crm[c_addr_col].fillna("")]
-                        c_grids = [str(x).strip() if pd.notna(x) else "" for x in df_crm[c_grid_col]] if c_grid_col else [""]*len(c_names)
-                        c_statuses = [clean_text(x) for x in df_crm[c_status_col].fillna("")] if c_status_col else [""]*len(c_names)
-                        crm_tuples = list(zip(c_names, c_addrs, c_grids, c_statuses))
+                    exact_crm_dict = {}
+                    prefix_crm_dict = {}
+
+                    c_names_raw = df_crm[c_name_col].fillna("").astype(str).tolist() if c_name_col else []
+                    c_addrs_raw = df_crm[c_addr_col].fillna("").astype(str).tolist() if c_addr_col else [""]*len(c_names_raw)
+                    c_grids_raw = df_crm[c_grid_col].fillna("").astype(str).tolist() if c_grid_col else [""]*len(c_names_raw)
+                    c_statuses_raw = df_crm[c_status_col].fillna("").astype(str).tolist() if c_status_col else [""]*len(c_names_raw)
+
+                    for idx in range(len(c_names_raw)):
+                        c_n_raw = c_names_raw[idx]
+                        c_n = clean_text(c_n_raw)
+                        c_st = clean_text(c_statuses_raw[idx])
+
+                        if not c_n or any(ex_st in c_st for ex_st in EXCLUDED_SF_STATUSES):
+                            continue
+
+                        rec = (c_n_raw, clean_text(c_addrs_raw[idx]), c_grids_raw[idx])
+                        if c_n not in exact_crm_dict:
+                            exact_crm_dict[c_n] = rec
+
+                        prefix = c_n[:2]
+                        if prefix not in prefix_crm_dict:
+                            prefix_crm_dict[prefix] = []
+                        prefix_crm_dict[prefix].append(rec)
 
                     grid_to_rec = {}
                     name_to_rec = {}
@@ -426,33 +472,37 @@ with tab4:
                             debug_reasons.append(f"Google 類別屬於選定的 WTG [{cat_str}]")
                             continue
 
-                        # 5. CRM 重複比對 (跳過 Terminated / Win Back Failed)
+                        # 5. CRM 重複比對 (雙階段極速比對，跳過 Terminated / Win Back Failed)
                         best_status = "P1 - New Lead"
                         best_crm_name = ""
                         best_sf_grid = ""
                         debug_msg = f"驗證通過 (Google類別: {cat_str or '未對應到，店名正常'})"
 
                         if l_name:
-                            prefix = l_name[:2]
-                            for c_name, c_addr, c_grid, c_status in crm_tuples:
-                                if not (c_name.startswith(prefix) or prefix in c_name):
-                                    continue
-                                
-                                # 過濾排除 Terminated 與 Win Back failed 狀態
-                                if any(ex_st in c_status for ex_st in EXCLUDED_SF_STATUSES):
-                                    continue
+                            # 精準名稱秒查
+                            if l_name in exact_crm_dict:
+                                c_n_raw, c_a, c_g = exact_crm_dict[l_name]
+                                best_status = "P4 - Duplicate"
+                                best_crm_name = c_n_raw
+                                best_sf_grid = c_g
+                                debug_msg = f"命中 CRM 精準名稱重複 ({c_n_raw})"
+                            else:
+                                # 字首局部比對
+                                prefix = l_name[:2]
+                                candidates = prefix_crm_dict.get(prefix, [])
+                                for c_n_raw, c_a, c_g in candidates:
+                                    c_n = clean_text(c_n_raw)
+                                    name_score = SequenceMatcher(None, l_name, c_n).ratio()
+                                    if name_score >= 0.75:
+                                        addr_score = SequenceMatcher(None, l_addr, c_a).ratio() if (l_addr and c_a) else 0.0
+                                        addr_contains = (l_addr in c_a or c_a in l_addr) if len(l_addr) > 4 and len(c_a) > 4 else False
 
-                                name_score = SequenceMatcher(None, l_name, c_name).ratio()
-                                if name_score >= 0.60:
-                                    addr_score = SequenceMatcher(None, l_addr, c_addr).ratio() if (l_addr and c_addr) else 0.0
-                                    addr_contains = (l_addr in c_addr or c_addr in l_addr) if len(l_addr) > 4 and len(c_addr) > 4 else False
-
-                                    if addr_score >= 0.50 or addr_contains:
-                                        best_status = "P4 - Duplicate"
-                                        best_crm_name = c_name
-                                        best_sf_grid = c_grid
-                                        debug_msg = f"命中 CRM 重複檔 ({c_name})"
-                                        break
+                                        if addr_score >= 0.50 or addr_contains:
+                                            best_status = "P4 - Duplicate"
+                                            best_crm_name = c_n_raw
+                                            best_sf_grid = c_g
+                                            debug_msg = f"命中 CRM 相似重複 ({c_n_raw})"
+                                            break
 
                         final_statuses.append(best_status)
                         matched_crm_names.append(best_crm_name)
@@ -606,7 +656,7 @@ with tab7:
     ### ⚡ 兩種審核情境選擇
 
     * **情境 1：只做 CRM 重複排重 (最快速，不用 Apify)**
-      * 開啟 **`⚡ SF 快速排重 (免 Apify)`** 頁籤，直接上傳 Raw Leads 與 CRM 大檔，1 秒完成比對。
+      * 開啟 **`⚡ SF 快速排重 (免 Apify)`** 頁籤，直接上傳 Raw Leads 與 CRM 大檔，1 秒極速完成比對。
       * 自動跳過 `Terminated` / `Win Back failed` 帳號。
     * **情境 2：完整 3 步驟審核 (含 Google 地圖類別與歇業判讀)**
       * 依照 `Step 1` $\rightarrow$ `Step 2` $\rightarrow$ `Step 3` 順序操作。
