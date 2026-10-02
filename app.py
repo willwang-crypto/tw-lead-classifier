@@ -275,7 +275,7 @@ with tab1:
                             best_sf_status = ""
 
                             if l_n:
-                                # 同地址比對：限定前2字主品牌相同且相似度 >= 50%，兼顧同品牌多品類與防抓錯
+                                # 同地址比對：主品牌前綴字相同（如 軟蛋醬、雞之助）即可挑選最高 Active 帳號
                                 if l_road:
                                     addr_key = f"{l_city}_{l_road}"
                                     candidates_at_addr = addr_crm_dict.get(addr_key, [])
@@ -288,8 +288,8 @@ with tab1:
                                         name_score = SequenceMatcher(None, l_n, c_n).ratio()
                                         first_stem = l_n[:2] if len(l_n)>=2 else l_n
 
-                                        # 核心邏輯：品牌前綴字相同 + 相似度 >= 0.50
-                                        if (first_stem and first_stem in c_n and name_score >= 0.50) or name_score >= 0.65:
+                                        # 同地址下，只要主品牌詞一致（軟蛋醬）或名稱相似度 >= 35% 即可帶出最高權重的 Active 帳號
+                                        if (first_stem and first_stem in c_n and name_score >= 0.35) or name_score >= 0.60:
                                             if prio > highest_prio:
                                                 highest_prio = prio
                                                 best_cand = (c_n_raw, c_g, c_st)
@@ -664,7 +664,7 @@ with tab4:
                                     name_score = SequenceMatcher(None, l_name, c_n).ratio()
                                     first_stem = l_name[:2] if len(l_name)>=2 else l_name
 
-                                    if (first_stem and first_stem in c_n and name_score >= 0.50) or name_score >= 0.65:
+                                    if (first_stem and first_stem in c_n and name_score >= 0.35) or name_score >= 0.60:
                                         if prio > highest_prio:
                                             highest_prio = prio
                                             best_cand = (c_n_raw, c_g, c_st)
