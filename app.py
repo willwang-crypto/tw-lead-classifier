@@ -128,7 +128,7 @@ def parse_taiwan_address(full_address, city_field="", area_field=""):
 
     return c_out, a_out, village, road
 
-# Salesforce Account Status 優先級權重判定
+# Salesforce Account Status 優先級權重判定 (數值越大優先級越高)
 def get_sf_status_priority(status_str):
     s = str(status_str).strip().lower()
     if any(st_name in s for st_name in ["active", "onboarding", "menu processing", "quality check"]):
@@ -186,7 +186,7 @@ tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
 # ── TAB 1: ⚡ SF 快速排重 (免 Apify · 含村里與路名比對) ─────────────
 with tab1:
     st.subheader("⚡ SF 快速排重 (免爬蟲 · 含村里與路名精準校驗)")
-    st.caption("支援中英文縣市自動對譯、獨立行政區與路名硬校驗，同品牌不同路名不誤判。")
+    st.caption("支援中英文縣市自動對譯、獨立行政區與路名硬校驗，同品牌不同路名分店絕不誤判。")
 
     col_q1, col_q2 = st.columns(2)
     with col_q1:
@@ -242,10 +242,12 @@ with tab1:
                                 continue
 
                             c_city, c_area, c_village, c_road = parse_taiwan_address(c_addrs_raw[idx], c_cities_raw[idx], c_areas_raw[idx])
+                            
+                            # 元組結構: (0:c_n_raw, 1:c_a_clean, 2:c_city, 3:c_area, 4:c_road, 5:c_g, 6:c_st_raw, 7:prio)
                             rec = (c_n_raw, clean_text(c_addrs_raw[idx]), c_city, c_area, c_road, c_grids_raw[idx], c_st_raw, prio)
 
                             exact_key = f"{c_n}_{c_city}_{c_road}" if c_road else f"{c_n}_{c_city}"
-                            if exact_key not in exact_crm_dict or prio > exact_crm_dict[exact_key][6]:
+                            if exact_key not in exact_crm_dict or prio > exact_crm_dict[exact_key][7]:
                                 exact_crm_dict[exact_key] = rec
 
                             prefix = c_n[:2]
@@ -299,7 +301,7 @@ with tab1:
                                         if l_city and c_city and l_city != c_city:
                                             continue
 
-                                        # 若兩邊都有路名但路名不同（如 富農街 vs 崇善路），排除不誤判！
+                                        # 若兩邊都有路名但路名不同，排除不誤判！
                                         if l_road and c_road and l_road != c_road and (l_road not in c_a and c_road not in l_a):
                                             continue
 
@@ -537,7 +539,7 @@ with tab4:
                         rec = (c_n_raw, clean_text(c_addrs_raw[idx]), c_city, c_area, c_road, c_grids_raw[idx], c_st_raw, prio)
 
                         exact_key = f"{c_n}_{c_city}_{c_road}" if c_road else f"{c_n}_{c_city}"
-                        if exact_key not in exact_crm_dict or prio > exact_crm_dict[exact_key][6]:
+                        if exact_key not in exact_crm_dict or prio > exact_crm_dict[exact_key][7]:
                             exact_crm_dict[exact_key] = rec
 
                         prefix = c_n[:2]
@@ -825,7 +827,7 @@ with tab6:
                 st.dataframe(df_sampled.head(20))
 
                 sample_csv_out = df_sampled.to_csv(index=False).encode('utf-8-sig')
-                st.download_button("📥 下載 KPI 抽樣結果 (CSV)", data=csv_out, file_name=f"kpi_sample_{len(df_sampled)}_rows.csv", mime="text/csv")
+                st.download_button("📥 下載 KPI 抽樣結果 (CSV)", data=sample_csv_out, file_name=f"kpi_sample_{len(df_sampled)}_rows.csv", mime="text/csv")
         except Exception as e:
             st.error(f"抽樣過程發生錯誤: {str(e)}")
 
