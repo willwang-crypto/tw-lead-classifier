@@ -48,6 +48,19 @@ WTG_CATEGORY_KEYWORDS = [
 # Salesforce CRM 需忽略的無效狀態 (Terminated / Win Back Failed)
 EXCLUDED_SF_STATUSES = ["terminated", "terminated<6m", "win back failed", "winback failed"]
 
+# Salesforce Account Status 優先級權重判定 (數值越大優先級越高)
+def get_sf_status_priority(status_str):
+    s = str(status_str).strip().lower()
+    if any(st_name in s for st_name in ["active", "onboarding", "menu processing", "quality check"]):
+        return 4
+    elif "collecting documents" in s:
+        return 3
+    elif any(st_name in s for st_name in ["new", "negotiation"]):
+        return 2
+    elif "lost" in s:
+        return 1
+    return 0  # 包含 Terminated / Win Back Failed 等排除狀態
+
 def clean_text(text):
     if not text or pd.isna(text): return ""
     t = str(text).strip().lower()
@@ -96,10 +109,10 @@ tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
     "📖 How to Use (操作指南)"
 ])
 
-# ── TAB 1: ⚡ SF 快速排重 (免 Apify · 極速效能版) ─────────────────
+# ── TAB 1: ⚡ SF 快速排重 (免 Apify · 優先級優化版) ─────────────────
 with tab1:
     st.subheader("⚡ SF 快速排重 (免爬蟲 · 直通比對)")
-    st.caption("專為 40 萬+ 筆大資料優化，1 秒自動排出 P4 - Duplicate，自動過濾 Terminated / Win Back Failed 狀態。")
+    st.caption("自動依 Status 權重優先擷取 (Active/Onboarding/Menu Processing/Quality Check > Collecting Documents > New/Negotiation > Lost)，並匯出 Salesforce Status。")
 
     col_q1, col_q2 = st.columns(2)
     with col_q1:
@@ -126,8 +139,7 @@ with tab1:
                 st.error("❌ 找不到店家名稱欄位，請檢查檔案標頭。")
             else:
                 if st.button("▶ 執行 SF 快速排重 (Run Fast Check)", type="primary"):
-                    with st.spinner("建立極速索引索引並秒速比對中..."):
-                        # 建立 CRM 雜湊字典索引 (排除 Terminated / Win Back Failed)
+                    with st.spinner("建立權重索引並秒速比對中..."):
                         exact_crm_dict = {}
                         prefix_crm_dict = {}
 
@@ -139,15 +151,20 @@ with tab1:
                         for idx in range(len(c_names_raw)):
                             c_n_raw = c_names_raw[idx]
                             c_n = clean_text(c_n_raw)
-                            c_st = clean_text(c_statuses_raw[idx])
+                            c_st_raw = c_statuses_raw[idx].strip()
+                            c_st_clean = clean_text(c_st_raw)
 
-                            if not c_n or any(ex_st in c_st for ex_st in EXCLUDED_SF_STATUSES):
+                            if not c_n or any(ex_st in c_st_clean for ex_st in EXCLUDED_SF_STATUSES):
                                 continue
 
-                            rec = (c_n_raw, clean_text(c_addrs_raw[idx]), c_grids_raw[idx])
+                            prio = get_sf_status_priority(c_st_clean)
+                            if prio == 0:
+                                continue
+
+                            rec = (c_n_raw, clean_text(c_addrs_raw[idx]), c_grids_raw[idx], c_st_raw, prio)
                             
-                            # 精準名稱索引
-                            if c_n not in exact_crm_dict:
+                            # 精準名稱索引 (保留優先權最高者)
+                            if c_n not in exact_crm_dict or prio > exact_crm_dict[c_n][4]:
                                 exact_crm_dict[c_n] = rec
 
                             # 字首分群索引
@@ -159,8 +176,9 @@ with tab1:
                         final_statuses = []
                         matched_crm_names = []
                         matched_sf_grids = []
+                        matched_sf_statuses = []
 
-                        # 比對 2.5 萬筆 Leads
+                        # 比對 Leads
                         l_names_raw = df_q_leads[l_name_col].fillna("").astype(str).tolist()
                         l_addrs_raw = df_q_leads[l_addr_col].fillna("").astype(str).tolist() if l_addr_col else [""]*len(l_names_raw)
 
@@ -174,19 +192,25 @@ with tab1:
                             best_status = "P1 - New Lead"
                             best_crm_name = ""
                             best_sf_grid = ""
+                            best_sf_status = ""
 
                             if l_n:
-                                # 第一階段：O(1) 精準字典秒查
+                                # 第一階段：精準名稱匹配
                                 if l_n in exact_crm_dict:
-                                    c_n_raw, c_a, c_g = exact_crm_dict[l_n]
+                                    c_n_raw, c_a, c_g, c_st, _ = exact_crm_dict[l_n]
                                     best_status = "P4 - Duplicate"
                                     best_crm_name = c_n_raw
                                     best_sf_grid = c_g
+                                    best_sf_status = c_st
                                 else:
-                                    # 第二階段：字首局部比對
+                                    # 第二階段：相似度匹配 (依優先級排序選出最佳匹配)
                                     prefix = l_n[:2]
                                     candidates = prefix_crm_dict.get(prefix, [])
-                                    for c_n_raw, c_a, c_g in candidates:
+                                    
+                                    best_candidate = None
+                                    highest_prio = -1
+
+                                    for c_n_raw, c_a, c_g, c_st, prio in candidates:
                                         c_n = clean_text(c_n_raw)
                                         name_score = SequenceMatcher(None, l_n, c_n).ratio()
                                         if name_score >= 0.75:
@@ -194,22 +218,31 @@ with tab1:
                                             addr_contains = (l_a in c_a or c_a in l_a) if len(l_a) > 4 and len(c_a) > 4 else False
 
                                             if addr_score >= 0.50 or addr_contains or not l_a:
-                                                best_status = "P4 - Duplicate"
-                                                best_crm_name = c_n_raw
-                                                best_sf_grid = c_g
-                                                break
+                                                if prio > highest_prio:
+                                                    highest_prio = prio
+                                                    best_candidate = (c_n_raw, c_g, c_st)
+                                                    if prio == 4:  # 已達最高優先級即可跳出
+                                                        break
+
+                                    if best_candidate:
+                                        best_status = "P4 - Duplicate"
+                                        best_crm_name = best_candidate[0]
+                                        best_sf_grid = best_candidate[1]
+                                        best_sf_status = best_candidate[2]
 
                             final_statuses.append(best_status)
                             matched_crm_names.append(best_crm_name)
                             matched_sf_grids.append(best_sf_grid)
+                            matched_sf_statuses.append(best_sf_status)
 
                         df_q_leads["CRM Duplicate Status"] = final_statuses
                         df_q_leads["Matched CRM Name"] = matched_crm_names
                         df_q_leads["Matched Salesforce GRID"] = matched_sf_grids
+                        df_q_leads["Matched Salesforce Status"] = matched_sf_statuses
 
                         st.write("### 📊 快速排重統計結果：")
                         st.write(df_q_leads["CRM Duplicate Status"].value_counts().to_dict())
-                        st.dataframe(df_q_leads[["CRM Duplicate Status", l_name_col, "Matched CRM Name", "Matched Salesforce GRID"]].head(30))
+                        st.dataframe(df_q_leads[["CRM Duplicate Status", l_name_col, "Matched CRM Name", "Matched Salesforce GRID", "Matched Salesforce Status"]].head(30))
 
                         q_csv_out = df_q_leads.to_csv(index=False).encode('utf-8-sig')
                         st.download_button("📥 下載快速排重報告 (CSV)", data=q_csv_out, file_name="sf_fast_dedup_result.csv", mime="text/csv")
@@ -321,7 +354,7 @@ with tab3:
 # ── TAB 4: Step 3 · Classify Leads & Filter ───────────────────────
 with tab4:
     st.subheader("📊 Step 3 · 全 Google 地圖類別動態過濾與 CRM 比對")
-    st.caption("透過 GRID 進行 100% 精準對接，自動排除 WTG 與歇業，並跳過 Terminated / Win Back Failed 狀態。")
+    st.caption("透過 GRID 進行 100% 精準對接，自動排除 WTG 與歇業，按 Status 優先級帶出 Salesforce GRID & Status。")
 
     c1, c2, c3 = st.columns(3)
     with c1:
@@ -385,13 +418,18 @@ with tab4:
                     for idx in range(len(c_names_raw)):
                         c_n_raw = c_names_raw[idx]
                         c_n = clean_text(c_n_raw)
-                        c_st = clean_text(c_statuses_raw[idx])
+                        c_st_raw = c_statuses_raw[idx].strip()
+                        c_st_clean = clean_text(c_st_raw)
 
-                        if not c_n or any(ex_st in c_st for ex_st in EXCLUDED_SF_STATUSES):
+                        if not c_n or any(ex_st in c_st_clean for ex_st in EXCLUDED_SF_STATUSES):
                             continue
 
-                        rec = (c_n_raw, clean_text(c_addrs_raw[idx]), c_grids_raw[idx])
-                        if c_n not in exact_crm_dict:
+                        prio = get_sf_status_priority(c_st_clean)
+                        if prio == 0:
+                            continue
+
+                        rec = (c_n_raw, clean_text(c_addrs_raw[idx]), c_grids_raw[idx], c_st_raw, prio)
+                        if c_n not in exact_crm_dict or prio > exact_crm_dict[c_n][4]:
                             exact_crm_dict[c_n] = rec
 
                         prefix = c_n[:2]
@@ -423,6 +461,7 @@ with tab4:
                     final_statuses = []
                     matched_crm_names = []
                     matched_sf_grids = []
+                    matched_sf_statuses = []
                     google_cats = []
                     debug_reasons = []
 
@@ -440,6 +479,7 @@ with tab4:
                             final_statuses.append("Wrong Target Group (WTG)")
                             matched_crm_names.append("")
                             matched_sf_grids.append("")
+                            matched_sf_statuses.append("")
                             google_cats.append("由店名攔截")
                             debug_reasons.append(f"店名包含關鍵字 [{hit_keyword}]")
                             continue
@@ -461,6 +501,7 @@ with tab4:
                             final_statuses.append("Permanently Closed")
                             matched_crm_names.append("")
                             matched_sf_grids.append("")
+                            matched_sf_statuses.append("")
                             debug_reasons.append("Google 地圖標示歇業")
                             continue
 
@@ -469,28 +510,32 @@ with tab4:
                             final_statuses.append("Wrong Target Group (WTG)")
                             matched_crm_names.append("")
                             matched_sf_grids.append("")
+                            matched_sf_statuses.append("")
                             debug_reasons.append(f"Google 類別屬於選定的 WTG [{cat_str}]")
                             continue
 
-                        # 5. CRM 重複比對 (雙階段極速比對，跳過 Terminated / Win Back Failed)
+                        # 5. CRM 重複比對
                         best_status = "P1 - New Lead"
                         best_crm_name = ""
                         best_sf_grid = ""
+                        best_sf_status = ""
                         debug_msg = f"驗證通過 (Google類別: {cat_str or '未對應到，店名正常'})"
 
                         if l_name:
-                            # 精準名稱秒查
                             if l_name in exact_crm_dict:
-                                c_n_raw, c_a, c_g = exact_crm_dict[l_name]
+                                c_n_raw, c_a, c_g, c_st, _ = exact_crm_dict[l_name]
                                 best_status = "P4 - Duplicate"
                                 best_crm_name = c_n_raw
                                 best_sf_grid = c_g
-                                debug_msg = f"命中 CRM 精準名稱重複 ({c_n_raw})"
+                                best_sf_status = c_st
+                                debug_msg = f"命中 CRM 重複 ({c_n_raw})"
                             else:
-                                # 字首局部比對
                                 prefix = l_name[:2]
                                 candidates = prefix_crm_dict.get(prefix, [])
-                                for c_n_raw, c_a, c_g in candidates:
+                                best_candidate = None
+                                highest_prio = -1
+
+                                for c_n_raw, c_a, c_g, c_st, prio in candidates:
                                     c_n = clean_text(c_n_raw)
                                     name_score = SequenceMatcher(None, l_name, c_n).ratio()
                                     if name_score >= 0.75:
@@ -498,28 +543,37 @@ with tab4:
                                         addr_contains = (l_addr in c_a or c_a in l_addr) if len(l_addr) > 4 and len(c_a) > 4 else False
 
                                         if addr_score >= 0.50 or addr_contains:
-                                            best_status = "P4 - Duplicate"
-                                            best_crm_name = c_n_raw
-                                            best_sf_grid = c_g
-                                            debug_msg = f"命中 CRM 相似重複 ({c_n_raw})"
-                                            break
+                                            if prio > highest_prio:
+                                                highest_prio = prio
+                                                best_candidate = (c_n_raw, c_g, c_st)
+                                                if prio == 4:
+                                                    break
+
+                                if best_candidate:
+                                    best_status = "P4 - Duplicate"
+                                    best_crm_name = best_candidate[0]
+                                    best_sf_grid = best_candidate[1]
+                                    best_sf_status = best_candidate[2]
+                                    debug_msg = f"命中 CRM 重複 ({best_candidate[0]})"
 
                         final_statuses.append(best_status)
                         matched_crm_names.append(best_crm_name)
                         matched_sf_grids.append(best_sf_grid)
+                        matched_sf_statuses.append(best_sf_status)
                         debug_reasons.append(debug_msg)
 
                     df_leads["Final Classification"] = final_statuses
                     df_leads["Google Category"] = google_cats
                     df_leads["Matched CRM Name"] = matched_crm_names
                     df_leads["Matched Salesforce GRID"] = matched_sf_grids
+                    df_leads["Matched Salesforce Status"] = matched_sf_statuses
                     df_leads["判定依據說明"] = debug_reasons
 
                     counts = df_leads["Final Classification"].value_counts().to_dict()
                     st.write("### 📊 最終分類統計結果：")
                     st.write(counts)
 
-                    st.dataframe(df_leads[["Final Classification", l_name_col, "Google Category", "Matched CRM Name", "Matched Salesforce GRID", "判定依據說明"]].head(30))
+                    st.dataframe(df_leads[["Final Classification", l_name_col, "Google Category", "Matched CRM Name", "Matched Salesforce GRID", "Matched Salesforce Status", "判定依據說明"]].head(30))
 
                     csv_out = df_leads.to_csv(index=False).encode('utf-8-sig')
                     st.download_button("📥 下載最終分類報告 (CSV)", data=csv_out, file_name="final_leads_classified.csv", mime="text/csv")
@@ -550,6 +604,7 @@ with tab5:
             t_addr_col = find_column(df_sf_t, ["street", "address", "地址"])
             m_addr_col = find_column(df_sf_m, ["street", "address", "地址"])
             m_grid_col = find_column(df_sf_m, ["grid", "sf_id", "salesforce id", "account id"])
+            m_status_col = find_column(df_sf_m, ["status", "account_status", "stage"])
 
             if not t_name_col or not m_name_col:
                 st.error("❌ 找不到帳號名稱欄位，請檢查檔案標頭。")
@@ -559,11 +614,13 @@ with tab5:
                         m_names = [clean_text(x) for x in df_sf_m[m_name_col].fillna("")]
                         m_addrs = [clean_text(x) for x in df_sf_m[m_addr_col].fillna("")] if m_addr_col else [""]*len(m_names)
                         m_grids = [str(x).strip() if pd.notna(x) else "" for x in df_sf_m[m_grid_col]] if m_grid_col else [""]*len(m_names)
-                        m_tuples = list(zip(m_names, m_addrs, m_grids))
+                        m_statuses = [str(x).strip() if pd.notna(x) else "" for x in df_sf_m[m_status_col]] if m_status_col else [""]*len(m_names)
+                        m_tuples = list(zip(m_names, m_addrs, m_grids, m_statuses))
 
                         audit_results = []
                         matched_names = []
                         matched_grids = []
+                        matched_statuses = []
 
                         for idx, r in df_sf_t.iterrows():
                             t_n_raw = str(r[t_name_col]) if pd.notna(r[t_name_col]) else ""
@@ -575,10 +632,11 @@ with tab5:
                             is_dup = False
                             matched_m_name = ""
                             matched_m_grid = ""
+                            matched_m_status = ""
 
                             if t_n:
                                 prefix = t_n[:2]
-                                for m_n, m_a, m_g in m_tuples:
+                                for m_n, m_a, m_g, m_s in m_tuples:
                                     if not (m_n.startswith(prefix) or prefix in m_n):
                                         continue
                                     
@@ -589,15 +647,18 @@ with tab5:
                                             is_dup = True
                                             matched_m_name = m_n
                                             matched_m_grid = m_g
+                                            matched_m_status = m_s
                                             break
 
                             audit_results.append("Duplicate Account" if is_dup else "Clean Account")
                             matched_names.append(matched_m_name)
                             matched_grids.append(matched_m_grid)
+                            matched_statuses.append(matched_m_status)
 
                         df_sf_t["Audit Result"] = audit_results
                         df_sf_t["Matched SF Master Name"] = matched_names
                         df_sf_t["Matched Salesforce GRID"] = matched_grids
+                        df_sf_t["Matched Salesforce Status"] = matched_statuses
 
                         st.write("### 📊 SF 帳號審核結果：")
                         st.write(df_sf_t["Audit Result"].value_counts().to_dict())
@@ -657,7 +718,7 @@ with tab7:
 
     * **情境 1：只做 CRM 重複排重 (最快速，不用 Apify)**
       * 開啟 **`⚡ SF 快速排重 (免 Apify)`** 頁籤，直接上傳 Raw Leads 與 CRM 大檔，1 秒極速完成比對。
-      * 自動跳過 `Terminated` / `Win Back failed` 帳號。
+      * 自動按 Status 優先級比對 (Active/Onboarding/Menu Processing/Quality Check > Collecting Documents > New/Negotiation > Lost)，並帶出其 Salesforce Status，自動跳過 `Terminated` / `Win Back failed` 帳號。
     * **情境 2：完整 3 步驟審核 (含 Google 地圖類別與歇業判讀)**
       * 依照 `Step 1` $\rightarrow$ `Step 2` $\rightarrow$ `Step 3` 順序操作。
 
@@ -693,5 +754,5 @@ with tab7:
     | **`P1 - New Lead`** | 驗證通過的合格餐飲新店家，無 CRM 重複紀錄（或比對到的舊帳號為 Terminated/Win Back Failed）。 | **直接發配給業務進行開發** |
     | **`Wrong Target Group (WTG)`** | 非目標店家（如：超級市場、餅店、健康食品店、生技、觀光工廠等）。 | 系統自動封存/排除 |
     | **`Permanently Closed`** | Google 地圖標示已歇業。 | 系統自動封存/排除 |
-    | **`P4 - Duplicate`** | CRM 中已存在該有效店家（附上 Salesforce 的既有 GRID/ID）。 | 排除，防止業務撞單 |
+    | **`P4 - Duplicate`** | CRM 中已存在該有效店家（附上 Salesforce 的既有 GRID/ID 與 Status）。 | 排除，防止業務撞單 |
     """)
