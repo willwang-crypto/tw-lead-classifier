@@ -82,6 +82,7 @@ def clean_text(text):
     if not text or pd.isna(text): return ""
     t = str(text).strip().lower()
     t = t.replace("臺", "台").replace("1樓", "").replace("一樓", "")
+    t = t.replace("鷄", "雞").replace("緩遠", "綏遠")  # 異體字與常見 CRM 錯字校正
     return t
 
 # 精準解析台灣地址（自動剔除 CRM 特有前綴標記與英文區塊）
@@ -92,13 +93,13 @@ def parse_taiwan_address(full_address, city_field="", area_field=""):
     if not full_address or pd.isna(full_address):
         return c_out, a_out, "", ""
 
-    s = str(full_address).replace("臺", "台").strip()
+    s = clean_text(full_address)
     s = re.sub(r'^\d{3,5}\s*', '', s)
     
     # 清理 CRM 特有的前綴與標號
     s = re.sub(r'city:.*?\n', '', s, flags=re.IGNORECASE)
     s = re.sub(r'area:.*?\n', '', s, flags=re.IGNORECASE)
-    s = re.sub(r'\([△oO]\)\s*', '', s)
+    s = re.sub(r'\([△oo]\)\s*', '', s, flags=re.IGNORECASE)
     
     if not c_out:
         for zh, en in CITY_MAP.items():
@@ -284,9 +285,9 @@ with tab1:
                                     for c_n_raw, c_a, c_city, c_area, c_road, c_g, c_st, prio in candidates_at_addr:
                                         c_n = clean_text(c_n_raw)
                                         name_score = SequenceMatcher(None, l_n, c_n).ratio()
-                                        first_kw = l_n[:3] if len(l_n)>=3 else l_n
+                                        first_kw = l_n[:2] if len(l_n)>=2 else l_n
 
-                                        if name_score >= 0.60 or (first_kw and first_kw in c_n):
+                                        if name_score >= 0.50 or (first_kw and first_kw in c_n):
                                             if prio > highest_prio:
                                                 highest_prio = prio
                                                 best_cand = (c_n_raw, c_g, c_st)
@@ -315,7 +316,7 @@ with tab1:
 
                                         c_n = clean_text(c_n_raw)
                                         name_score = SequenceMatcher(None, l_n, c_n).ratio()
-                                        if name_score >= 0.75:
+                                        if name_score >= 0.65:
                                             addr_score = SequenceMatcher(None, l_a, c_a).ratio() if (l_a and c_a) else 0.0
                                             area_match = (l_area == c_area) if (l_area and c_area) else False
                                             road_match = (l_road == c_road or l_road in c_a or c_road in l_a) if (l_road or c_road) else False
@@ -658,9 +659,9 @@ with tab4:
                                 for c_n_raw, c_a, c_city, c_area, c_road, c_g, c_st, prio in candidates_at_addr:
                                     c_n = clean_text(c_n_raw)
                                     name_score = SequenceMatcher(None, l_name, c_n).ratio()
-                                    first_kw = l_name[:3] if len(l_name)>=3 else l_name
+                                    first_kw = l_name[:2] if len(l_name)>=2 else l_name
 
-                                    if name_score >= 0.60 or (first_kw and first_kw in c_n):
+                                    if name_score >= 0.50 or (first_kw and first_kw in c_n):
                                         if prio > highest_prio:
                                             highest_prio = prio
                                             best_cand = (c_n_raw, c_g, c_st)
@@ -688,7 +689,7 @@ with tab4:
 
                                     c_n = clean_text(c_n_raw)
                                     name_score = SequenceMatcher(None, l_name, c_n).ratio()
-                                    if name_score >= 0.75:
+                                    if name_score >= 0.65:
                                         addr_score = SequenceMatcher(None, l_a, c_a).ratio() if (l_a and c_a) else 0.0
                                         area_match = (l_area == c_area) if (l_area and c_area) else False
                                         road_match = (l_road == c_road or l_road in c_a or c_road in l_a) if (l_road or c_road) else False
@@ -853,7 +854,7 @@ with tab6:
                 st.dataframe(df_sampled.head(20))
 
                 sample_csv_out = df_sampled.to_csv(index=False).encode('utf-8-sig')
-                st.download_button("📥 下載 KPI 抽樣結果 (CSV)", data=sample_csv_out, file_name=f"kpi_sample_{len(df_sampled)}_rows.csv", mime="text/csv")
+                st.download_button("📥 下載 KPI 抽樣結果 (CSV)", data=csv_out, file_name=f"kpi_sample_{len(df_sampled)}_rows.csv", mime="text/csv")
         except Exception as e:
             st.error(f"抽樣過程發生錯誤: {str(e)}")
 
@@ -869,7 +870,7 @@ with tab7:
 
     * **情境 1：只做 CRM 重複排重 (最快速，不用 Apify)**
       * 開啟 **`⚡ SF 快速排重 (免 Apify)`** 頁籤，直接上傳 Raw Leads 與 CRM 大檔，1 秒極速完成比對。
-      * 自動具備 **「同地址多帳號 Active 權重優先帶出」** 邏輯（如 `軟蛋醬` 在同地址有 Active 的 HAR7AU 與 Lost 的 HAUGGC 時，自動精準帶出 Active 的 HAR7AU）。
+      * 自動具備 **「同地址多帳號 Active 權重優先帶出」** 邏輯與 **「同音/形似易錯字校正（如緩遠路$\rightarrow$綏遠路）」**。
       * 自動按 Status 優先級比對 (Active/Onboarding/Menu Processing/Quality Check > Collecting Documents > New/Negotiation > Lost)，並帶出其 Salesforce Status，自動跳過 `Terminated` / `Win Back failed` 帳號。
     * **情境 2：完整 3 步驟審核 (含 Google 地圖類別與歇業判讀)**
       * 依照 `Step 1` $\rightarrow$ `Step 2` $\rightarrow$ `Step 3` 順序操作。
