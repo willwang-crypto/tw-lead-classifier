@@ -45,8 +45,88 @@ WTG_CATEGORY_KEYWORDS = [
     "內衣", "堅果", "乳酪雪糕", "禮盒", "果乾", "車"
 ]
 
-# Salesforce CRM 需忽略的無效狀態 (Terminated / Win Back Failed)
+# 中英文縣市對譯表 (對齊中英文 City 格式)
+CITY_MAP = {
+    "台北市": "taipei", "臺北市": "taipei",
+    "新北市": "new taipei",
+    "基隆市": "keelung",
+    "桃園市": "taoyuan",
+    "新竹市": "hsinchu", "新竹縣": "hsinchu",
+    "苗栗縣": "miaoli",
+    "台中市": "taichung", "臺中市": "taichung",
+    "彰化縣": "changhua",
+    "南投縣": "nantou",
+    "雲林縣": "yunlin",
+    "嘉義市": "chiayi", "嘉義縣": "chiayi",
+    "台南市": "tainan", "臺南市": "tainan",
+    "高雄市": "kaohsiung", "高雄市": "kaohsiung",
+    "屏東縣": "pingtung",
+    "宜蘭縣": "yilan",
+    "花蓮縣": "hualien",
+    "台東縣": "taitung", "臺東縣": "taitung",
+    "澎湖縣": "penghu", "金門縣": "kinmen", "連江縣": "lienchiang"
+}
+
+# Salesforce CRM 需忽略的無效狀態
 EXCLUDED_SF_STATUSES = ["terminated", "terminated<6m", "win back failed", "winback failed"]
+
+def normalize_city(city_str):
+    if not city_str or pd.isna(city_str): return ""
+    s = str(city_str).strip().lower()
+    for zh, en in CITY_MAP.items():
+        if zh in s or en in s:
+            return en
+    return s
+
+def clean_text(text):
+    if not text or pd.isna(text): return ""
+    t = str(text).strip().lower()
+    t = t.replace("臺", "台").replace("1樓", "").replace("一樓", "")
+    return t
+
+# 抽取縣市、鄉鎮區、村里與路名
+def parse_taiwan_address(full_address, city_field="", area_field=""):
+    c_out = normalize_city(city_field)
+    a_out = clean_text(area_field)
+    
+    if not full_address or pd.isna(full_address):
+        return c_out, a_out, "", ""
+
+    s = str(full_address).replace("臺", "台").strip()
+    s = re.sub(r'^\d{3,5}\s*', '', s)  # 移除郵遞區號
+    
+    # 解析縣市
+    if not c_out:
+        for zh, en in CITY_MAP.items():
+            if zh in s:
+                c_out = en
+                break
+
+    # 移除縣市字眼
+    city_zh_list = ["台北市", "新北市", "基隆市", "桃園市", "新竹市", "新竹縣", "苗栗縣", "台中市", "彰化縣", "南投縣", "雲林縣", "嘉義市", "嘉義縣", "台南市", "高雄市", "屏東縣", "宜蘭縣", "花蓮縣", "台東縣", "澎湖縣", "金門縣", "連江縣"]
+    for c in city_zh_list:
+        s = s.replace(c, "")
+
+    # 解析鄉鎮區
+    if not a_out:
+        area_m = re.search(r'^([\u4e00-\u9fa5]{1,4}?(市|區|鎮|鄉))', s)
+        if area_m:
+            a_out = clean_text(area_m.group(1))
+
+    if a_out:
+        s = re.sub(r'^[\u4e00-\u9fa5]{1,4}?(市|區|鎮|鄉)', '', s)
+
+    # 1. 抽取村里 (Village)
+    village_m = re.search(r'^([\u4e00-\u9fa5]{1,4}?(村|里))', s)
+    village = clean_text(village_m.group(1)) if village_m else ""
+    if village:
+        s = s.replace(village_m.group(1), "")
+
+    # 2. 抽取路名 (Road Name)
+    road_m = re.search(r'([\u4e00-\u9fa50-9a-zA-Z]{1,8}?(路|街|大道)([\u4e00-\u9fa50-9a-zA-Z一二三四五六七八九十0-9]+?段)?)', s)
+    road = clean_text(road_m.group(1)) if road_m else ""
+
+    return c_out, a_out, village, road
 
 # Salesforce Account Status 優先級權重判定
 def get_sf_status_priority(status_str):
@@ -60,34 +140,6 @@ def get_sf_status_priority(status_str):
     elif "lost" in s:
         return 1
     return 0
-
-def clean_text(text):
-    if not text or pd.isna(text): return ""
-    t = str(text).strip().lower()
-    t = t.replace("臺", "台").replace("1樓", "").replace("一樓", "")
-    return t
-
-# 抽取縣市與鄉鎮區
-def extract_city_and_area(full_address, city_field="", area_field=""):
-    c_out, a_out = "", ""
-    if city_field and pd.notna(city_field):
-        c_out = str(city_field).strip().replace("臺", "台")
-    if area_field and pd.notna(area_field):
-        a_out = str(area_field).strip()
-
-    addr = str(full_address).replace("臺", "台").strip() if pd.notna(full_address) else ""
-
-    if not c_out:
-        city_m = re.search(r'(台灣|臺灣)?(台北市|新北市|基隆市|桃園市|新竹市|新竹縣|苗栗縣|台中市|彰化縣|南投縣|雲林縣|嘉義市|嘉義縣|台南市|高雄市|屏東縣|宜蘭縣|花蓮縣|台東縣|澎湖縣|金門縣|連江縣)', addr)
-        if city_m:
-            c_out = city_m.group(2)
-
-    if not a_out and addr:
-        area_m = re.search(r'([\u4e00-\u9fa5]{1,4}?(市|區|鎮|鄉))', addr.replace(c_out, ""))
-        if area_m:
-            a_out = area_m.group(1)
-
-    return clean_text(c_out), clean_text(a_out)
 
 def safe_load_csv(uploaded_file):
     if uploaded_file.name.endswith(".csv"):
@@ -131,10 +183,10 @@ tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
     "📖 How to Use (操作指南)"
 ])
 
-# ── TAB 1: ⚡ SF 快速排重 (免 Apify · 行政區強校驗版) ────────────────
+# ── TAB 1: ⚡ SF 快速排重 (免 Apify · 含村里與路名比對) ─────────────
 with tab1:
-    st.subheader("⚡ SF 快速排重 (免爬蟲 · 具備縣市與行政區硬校驗)")
-    st.caption("支援獨立行政區比對，完全避免跨縣市對錯。依 Status 權重優先擷取有效帳號。")
+    st.subheader("⚡ SF 快速排重 (免爬蟲 · 含村里與路名精準校驗)")
+    st.caption("支援中英文縣市自動對譯、獨立行政區與路名硬校驗，同品牌不同路名不誤判。")
 
     col_q1, col_q2 = st.columns(2)
     with col_q1:
@@ -165,7 +217,7 @@ with tab1:
                 st.error("❌ 找不到店家名稱欄位，請檢查檔案標頭。")
             else:
                 if st.button("▶ 執行 SF 快速排重 (Run Fast Check)", type="primary"):
-                    with st.spinner("建立行政區雙重索引並秒速比對中..."):
+                    with st.spinner("建立村里與路名硬校驗索引中..."):
                         exact_crm_dict = {}
                         prefix_crm_dict = {}
 
@@ -189,11 +241,10 @@ with tab1:
                             if prio == 0:
                                 continue
 
-                            c_city, c_area = extract_city_and_area(c_addrs_raw[idx], c_cities_raw[idx], c_areas_raw[idx])
-                            rec = (c_n_raw, clean_text(c_addrs_raw[idx]), c_city, c_area, c_grids_raw[idx], c_st_raw, prio)
-                            
-                            # 名稱 + 縣市 雙重 KEY 索引
-                            exact_key = f"{c_n}_{c_city}"
+                            c_city, c_area, c_village, c_road = parse_taiwan_address(c_addrs_raw[idx], c_cities_raw[idx], c_areas_raw[idx])
+                            rec = (c_n_raw, clean_text(c_addrs_raw[idx]), c_city, c_area, c_road, c_grids_raw[idx], c_st_raw, prio)
+
+                            exact_key = f"{c_n}_{c_city}_{c_road}" if c_road else f"{c_n}_{c_city}"
                             if exact_key not in exact_crm_dict or prio > exact_crm_dict[exact_key][6]:
                                 exact_crm_dict[exact_key] = rec
 
@@ -218,7 +269,7 @@ with tab1:
 
                             l_n = clean_text(l_n_raw)
                             l_a = clean_text(l_a_raw)
-                            l_city, l_area = extract_city_and_area(l_a_raw, l_cities_raw[idx], l_areas_raw[idx])
+                            l_city, l_area, l_village, l_road = parse_taiwan_address(l_a_raw, l_cities_raw[idx], l_areas_raw[idx])
 
                             best_status = "P1 - New Lead"
                             best_crm_name = ""
@@ -226,40 +277,40 @@ with tab1:
                             best_sf_status = ""
 
                             if l_n:
-                                exact_key = f"{l_n}_{l_city}"
-                                # 第一階段：精準名稱 + 縣市驗證
+                                exact_key = f"{l_n}_{l_city}_{l_road}" if l_road else f"{l_n}_{l_city}"
+                                # 第一階段：精準店名 + 縣市 + 路名匹配
                                 if exact_key in exact_crm_dict:
-                                    c_n_raw, c_a, c_city, c_area, c_g, c_st, _ = exact_crm_dict[exact_key]
-                                    
-                                    # 行政區卡關判斷：只有縣市一致且 (區一致 或 無區欄位) 才通過
-                                    if not l_area or not c_area or l_area == c_area or l_area in c_a or c_area in l_a:
-                                        best_status = "P4 - Duplicate"
-                                        best_crm_name = c_n_raw
-                                        best_sf_grid = c_g
-                                        best_sf_status = c_st
+                                    c_n_raw, c_a, c_city, c_area, c_road, c_g, c_st, _ = exact_crm_dict[exact_key]
+                                    best_status = "P4 - Duplicate"
+                                    best_crm_name = c_n_raw
+                                    best_sf_grid = c_g
+                                    best_sf_status = c_st
 
                                 if best_status != "P4 - Duplicate":
-                                    # 第二階段：字首模糊比對 + 縣市強制一致
+                                    # 第二階段：相似店名 + 路名碰撞比對
                                     prefix = l_n[:2]
                                     candidates = prefix_crm_dict.get(prefix, [])
                                     
                                     best_candidate = None
                                     highest_prio = -1
 
-                                    for c_n_raw, c_a, c_city, c_area, c_g, c_st, prio in candidates:
-                                        c_n = clean_text(c_n_raw)
-                                        
-                                        # 縣市不符直接跳過，防止跨縣市誤配！
+                                    for c_n_raw, c_a, c_city, c_area, c_road, c_g, c_st, prio in candidates:
+                                        # 縣市不符直接排除
                                         if l_city and c_city and l_city != c_city:
                                             continue
 
+                                        # 若兩邊都有路名但路名不同（如 富農街 vs 崇善路），排除不誤判！
+                                        if l_road and c_road and l_road != c_road and (l_road not in c_a and c_road not in l_a):
+                                            continue
+
+                                        c_n = clean_text(c_n_raw)
                                         name_score = SequenceMatcher(None, l_n, c_n).ratio()
                                         if name_score >= 0.75:
                                             addr_score = SequenceMatcher(None, l_a, c_a).ratio() if (l_a and c_a) else 0.0
                                             area_match = (l_area == c_area) if (l_area and c_area) else False
-                                            addr_contains = (l_a in c_a or c_a in l_a) if len(l_a) > 4 and len(c_a) > 4 else False
+                                            road_match = (l_road == c_road or l_road in c_a or c_road in l_a) if (l_road or c_road) else False
 
-                                            if addr_score >= 0.50 or area_match or addr_contains:
+                                            if addr_score >= 0.50 or road_match or (area_match and not l_road):
                                                 if prio > highest_prio:
                                                     highest_prio = prio
                                                     best_candidate = (c_n_raw, c_g, c_st)
@@ -402,7 +453,7 @@ with tab3:
 # ── TAB 4: Step 3 · Classify Leads & Filter ───────────────────────
 with tab4:
     st.subheader("📊 Step 3 · 全 Google 地圖類別動態過濾與 CRM 比對")
-    st.caption("透過 GRID 進行 100% 精準對接，自動排除 WTG 與歇業，並進行縣市/行政區雙重核對。")
+    st.caption("透過 GRID 進行 100% 精準對接，自動排除 WTG 與歇業，並具備村里與路名精準校驗。")
 
     c1, c2, c3 = st.columns(3)
     with c1:
@@ -482,10 +533,10 @@ with tab4:
                         if prio == 0:
                             continue
 
-                        c_city, c_area = extract_city_and_area(c_addrs_raw[idx], c_cities_raw[idx], c_areas_raw[idx])
-                        rec = (c_n_raw, clean_text(c_addrs_raw[idx]), c_city, c_area, c_grids_raw[idx], c_st_raw, prio)
+                        c_city, c_area, c_village, c_road = parse_taiwan_address(c_addrs_raw[idx], c_cities_raw[idx], c_areas_raw[idx])
+                        rec = (c_n_raw, clean_text(c_addrs_raw[idx]), c_city, c_area, c_road, c_grids_raw[idx], c_st_raw, prio)
 
-                        exact_key = f"{c_n}_{c_city}"
+                        exact_key = f"{c_n}_{c_city}_{c_road}" if c_road else f"{c_n}_{c_city}"
                         if exact_key not in exact_crm_dict or prio > exact_crm_dict[exact_key][6]:
                             exact_crm_dict[exact_key] = rec
 
@@ -534,7 +585,7 @@ with tab4:
 
                         l_name = clean_text(l_name_raw)
                         l_addr = clean_text(l_addr_raw)
-                        l_city, l_area = extract_city_and_area(l_addr_raw, l_cities_raw[idx], l_areas_raw[idx])
+                        l_city, l_area, l_village, l_road = parse_taiwan_address(l_addr_raw, l_cities_raw[idx], l_areas_raw[idx])
 
                         # 1. 硬過濾公司/B2B/非目標店名關鍵字
                         hit_keyword = next((nk for nk in NON_FOOD_NAME_KEYWORDS if nk.lower() in l_name), None)
@@ -577,7 +628,7 @@ with tab4:
                             debug_reasons.append(f"Google 類別屬於選定的 WTG [{cat_str}]")
                             continue
 
-                        # 5. CRM 重複比對 (具備行政區硬校驗)
+                        # 5. CRM 重複比對
                         best_status = "P1 - New Lead"
                         best_crm_name = ""
                         best_sf_grid = ""
@@ -585,15 +636,14 @@ with tab4:
                         debug_msg = f"驗證通過 (Google類別: {cat_str or '未對應到，店名正常'})"
 
                         if l_name:
-                            exact_key = f"{l_name}_{l_city}"
+                            exact_key = f"{l_name}_{l_city}_{l_road}" if l_road else f"{l_name}_{l_city}"
                             if exact_key in exact_crm_dict:
-                                c_n_raw, c_a, c_city, c_area, c_g, c_st, _ = exact_crm_dict[exact_key]
-                                if not l_area or not c_area or l_area == c_area or l_area in c_a or c_area in l_a:
-                                    best_status = "P4 - Duplicate"
-                                    best_crm_name = c_n_raw
-                                    best_sf_grid = c_g
-                                    best_sf_status = c_st
-                                    debug_msg = f"命中 CRM 重複 ({c_n_raw})"
+                                c_n_raw, c_a, c_city, c_area, c_road, c_g, c_st, _ = exact_crm_dict[exact_key]
+                                best_status = "P4 - Duplicate"
+                                best_crm_name = c_n_raw
+                                best_sf_grid = c_g
+                                best_sf_status = c_st
+                                debug_msg = f"命中 CRM 重複 ({c_n_raw})"
 
                             if best_status != "P4 - Duplicate":
                                 prefix = l_name[:2]
@@ -601,19 +651,21 @@ with tab4:
                                 best_candidate = None
                                 highest_prio = -1
 
-                                for c_n_raw, c_a, c_city, c_area, c_g, c_st, prio in candidates:
-                                    c_n = clean_text(c_n_raw)
-
+                                for c_n_raw, c_a, c_city, c_area, c_road, c_g, c_st, prio in candidates:
                                     if l_city and c_city and l_city != c_city:
                                         continue
 
+                                    if l_road and c_road and l_road != c_road and (l_road not in c_a and c_road not in l_a):
+                                        continue
+
+                                    c_n = clean_text(c_n_raw)
                                     name_score = SequenceMatcher(None, l_name, c_n).ratio()
                                     if name_score >= 0.75:
                                         addr_score = SequenceMatcher(None, l_a, c_a).ratio() if (l_a and c_a) else 0.0
                                         area_match = (l_area == c_area) if (l_area and c_area) else False
-                                        addr_contains = (l_a in c_a or c_a in l_a) if len(l_a) > 4 and len(c_a) > 4 else False
+                                        road_match = (l_road == c_road or l_road in c_a or c_road in l_a) if (l_road or c_road) else False
 
-                                        if addr_score >= 0.50 or area_match or addr_contains:
+                                        if addr_score >= 0.50 or road_match or (area_match and not l_road):
                                             if prio > highest_prio:
                                                 highest_prio = prio
                                                 best_candidate = (c_n_raw, c_g, c_st)
@@ -789,7 +841,7 @@ with tab7:
 
     * **情境 1：只做 CRM 重複排重 (最快速，不用 Apify)**
       * 開啟 **`⚡ SF 快速排重 (免 Apify)`** 頁籤，直接上傳 Raw Leads 與 CRM 大檔，1 秒極速完成比對。
-      * 自動具備 **「縣市與行政區硬校驗」**，徹底杜絕跨縣市對錯問題。
+      * 自動具備 **「中英文縣市對譯、獨立行政區、村里與路名硬校驗」**，同品牌不同路名分店絕不誤判。
       * 自動按 Status 優先級比對 (Active/Onboarding/Menu Processing/Quality Check > Collecting Documents > New/Negotiation > Lost)，並帶出其 Salesforce Status，自動跳過 `Terminated` / `Win Back failed` 帳號。
     * **情境 2：完整 3 步驟審核 (含 Google 地圖類別與歇業判讀)**
       * 依照 `Step 1` $\rightarrow$ `Step 2` $\rightarrow$ `Step 3` 順序操作。
