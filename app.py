@@ -48,7 +48,7 @@ WTG_CATEGORY_KEYWORDS = [
 # Salesforce CRM 需忽略的無效狀態 (Terminated / Win Back Failed)
 EXCLUDED_SF_STATUSES = ["terminated", "terminated<6m", "win back failed", "winback failed"]
 
-# Salesforce Account Status 優先級權重判定 (數值越大優先級越高)
+# Salesforce Account Status 優先級權重判定
 def get_sf_status_priority(status_str):
     s = str(status_str).strip().lower()
     if any(st_name in s for st_name in ["active", "onboarding", "menu processing", "quality check"]):
@@ -59,13 +59,35 @@ def get_sf_status_priority(status_str):
         return 2
     elif "lost" in s:
         return 1
-    return 0  # 包含 Terminated / Win Back Failed 等排除狀態
+    return 0
 
 def clean_text(text):
     if not text or pd.isna(text): return ""
     t = str(text).strip().lower()
     t = t.replace("臺", "台").replace("1樓", "").replace("一樓", "")
     return t
+
+# 抽取縣市與鄉鎮區
+def extract_city_and_area(full_address, city_field="", area_field=""):
+    c_out, a_out = "", ""
+    if city_field and pd.notna(city_field):
+        c_out = str(city_field).strip().replace("臺", "台")
+    if area_field and pd.notna(area_field):
+        a_out = str(area_field).strip()
+
+    addr = str(full_address).replace("臺", "台").strip() if pd.notna(full_address) else ""
+
+    if not c_out:
+        city_m = re.search(r'(台灣|臺灣)?(台北市|新北市|基隆市|桃園市|新竹市|新竹縣|苗栗縣|台中市|彰化縣|南投縣|雲林縣|嘉義市|嘉義縣|台南市|高雄市|屏東縣|宜蘭縣|花蓮縣|台東縣|澎湖縣|金門縣|連江縣)', addr)
+        if city_m:
+            c_out = city_m.group(2)
+
+    if not a_out and addr:
+        area_m = re.search(r'([\u4e00-\u9fa5]{1,4}?(市|區|鎮|鄉))', addr.replace(c_out, ""))
+        if area_m:
+            a_out = area_m.group(1)
+
+    return clean_text(c_out), clean_text(a_out)
 
 def safe_load_csv(uploaded_file):
     if uploaded_file.name.endswith(".csv"):
@@ -109,10 +131,10 @@ tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
     "📖 How to Use (操作指南)"
 ])
 
-# ── TAB 1: ⚡ SF 快速排重 (免 Apify · 優先級優化版) ─────────────────
+# ── TAB 1: ⚡ SF 快速排重 (免 Apify · 行政區強校驗版) ────────────────
 with tab1:
-    st.subheader("⚡ SF 快速排重 (免爬蟲 · 直通比對)")
-    st.caption("自動依 Status 權重優先擷取 (Active/Onboarding/Menu Processing/Quality Check > Collecting Documents > New/Negotiation > Lost)，並匯出 Salesforce Status。")
+    st.subheader("⚡ SF 快速排重 (免爬蟲 · 具備縣市與行政區硬校驗)")
+    st.caption("支援獨立行政區比對，完全避免跨縣市對錯。依 Status 權重優先擷取有效帳號。")
 
     col_q1, col_q2 = st.columns(2)
     with col_q1:
@@ -129,9 +151,13 @@ with tab1:
 
             l_name_col = find_column(df_q_leads, ["company / account", "company", "account", "name", "title"])
             l_addr_col = find_column(df_q_leads, ["street", "address", "地址"])
+            l_city_col = find_column(df_q_leads, ["city", "縣市", "市"])
+            l_area_col = find_column(df_q_leads, ["area", "district", "鄉鎮市區", "區"])
 
             c_name_col = find_column(df_q_crm, ["account name", "company", "account", "name", "title"])
-            c_addr_col = find_column(df_q_crm, ["street", "address", "地址"])
+            c_addr_col = find_column(df_q_crm, ["formatted_restaurant_address__c", "street", "address", "地址"])
+            c_city_col = find_column(df_q_crm, ["city", "縣市"])
+            c_area_col = find_column(df_q_crm, ["area", "district", "鄉鎮區"])
             c_grid_col = find_column(df_q_crm, ["grid", "sf_id", "salesforce id", "account id"])
             c_status_col = find_column(df_q_crm, ["status", "account_status", "stage"])
 
@@ -139,12 +165,14 @@ with tab1:
                 st.error("❌ 找不到店家名稱欄位，請檢查檔案標頭。")
             else:
                 if st.button("▶ 執行 SF 快速排重 (Run Fast Check)", type="primary"):
-                    with st.spinner("建立權重索引並秒速比對中..."):
+                    with st.spinner("建立行政區雙重索引並秒速比對中..."):
                         exact_crm_dict = {}
                         prefix_crm_dict = {}
 
                         c_names_raw = df_q_crm[c_name_col].fillna("").astype(str).tolist()
                         c_addrs_raw = df_q_crm[c_addr_col].fillna("").astype(str).tolist() if c_addr_col else [""]*len(c_names_raw)
+                        c_cities_raw = df_q_crm[c_city_col].fillna("").astype(str).tolist() if c_city_col else [""]*len(c_names_raw)
+                        c_areas_raw = df_q_crm[c_area_col].fillna("").astype(str).tolist() if c_area_col else [""]*len(c_names_raw)
                         c_grids_raw = df_q_crm[c_grid_col].fillna("").astype(str).tolist() if c_grid_col else [""]*len(c_names_raw)
                         c_statuses_raw = df_q_crm[c_status_col].fillna("").astype(str).tolist() if c_status_col else [""]*len(c_names_raw)
 
@@ -161,13 +189,14 @@ with tab1:
                             if prio == 0:
                                 continue
 
-                            rec = (c_n_raw, clean_text(c_addrs_raw[idx]), c_grids_raw[idx], c_st_raw, prio)
+                            c_city, c_area = extract_city_and_area(c_addrs_raw[idx], c_cities_raw[idx], c_areas_raw[idx])
+                            rec = (c_n_raw, clean_text(c_addrs_raw[idx]), c_city, c_area, c_grids_raw[idx], c_st_raw, prio)
                             
-                            # 精準名稱索引 (保留優先權最高者)
-                            if c_n not in exact_crm_dict or prio > exact_crm_dict[c_n][4]:
-                                exact_crm_dict[c_n] = rec
+                            # 名稱 + 縣市 雙重 KEY 索引
+                            exact_key = f"{c_n}_{c_city}"
+                            if exact_key not in exact_crm_dict or prio > exact_crm_dict[exact_key][6]:
+                                exact_crm_dict[exact_key] = rec
 
-                            # 字首分群索引
                             prefix = c_n[:2]
                             if prefix not in prefix_crm_dict:
                                 prefix_crm_dict[prefix] = []
@@ -178,9 +207,10 @@ with tab1:
                         matched_sf_grids = []
                         matched_sf_statuses = []
 
-                        # 比對 Leads
                         l_names_raw = df_q_leads[l_name_col].fillna("").astype(str).tolist()
                         l_addrs_raw = df_q_leads[l_addr_col].fillna("").astype(str).tolist() if l_addr_col else [""]*len(l_names_raw)
+                        l_cities_raw = df_q_leads[l_city_col].fillna("").astype(str).tolist() if l_city_col else [""]*len(l_names_raw)
+                        l_areas_raw = df_q_leads[l_area_col].fillna("").astype(str).tolist() if l_area_col else [""]*len(l_names_raw)
 
                         for idx in range(len(l_names_raw)):
                             l_n_raw = l_names_raw[idx]
@@ -188,6 +218,7 @@ with tab1:
 
                             l_n = clean_text(l_n_raw)
                             l_a = clean_text(l_a_raw)
+                            l_city, l_area = extract_city_and_area(l_a_raw, l_cities_raw[idx], l_areas_raw[idx])
 
                             best_status = "P1 - New Lead"
                             best_crm_name = ""
@@ -195,33 +226,44 @@ with tab1:
                             best_sf_status = ""
 
                             if l_n:
-                                # 第一階段：精準名稱匹配
-                                if l_n in exact_crm_dict:
-                                    c_n_raw, c_a, c_g, c_st, _ = exact_crm_dict[l_n]
-                                    best_status = "P4 - Duplicate"
-                                    best_crm_name = c_n_raw
-                                    best_sf_grid = c_g
-                                    best_sf_status = c_st
-                                else:
-                                    # 第二階段：相似度匹配 (依優先級排序選出最佳匹配)
+                                exact_key = f"{l_n}_{l_city}"
+                                # 第一階段：精準名稱 + 縣市驗證
+                                if exact_key in exact_crm_dict:
+                                    c_n_raw, c_a, c_city, c_area, c_g, c_st, _ = exact_crm_dict[exact_key]
+                                    
+                                    # 行政區卡關判斷：只有縣市一致且 (區一致 或 無區欄位) 才通過
+                                    if not l_area or not c_area or l_area == c_area or l_area in c_a or c_area in l_a:
+                                        best_status = "P4 - Duplicate"
+                                        best_crm_name = c_n_raw
+                                        best_sf_grid = c_g
+                                        best_sf_status = c_st
+
+                                if best_status != "P4 - Duplicate":
+                                    # 第二階段：字首模糊比對 + 縣市強制一致
                                     prefix = l_n[:2]
                                     candidates = prefix_crm_dict.get(prefix, [])
                                     
                                     best_candidate = None
                                     highest_prio = -1
 
-                                    for c_n_raw, c_a, c_g, c_st, prio in candidates:
+                                    for c_n_raw, c_a, c_city, c_area, c_g, c_st, prio in candidates:
                                         c_n = clean_text(c_n_raw)
+                                        
+                                        # 縣市不符直接跳過，防止跨縣市誤配！
+                                        if l_city and c_city and l_city != c_city:
+                                            continue
+
                                         name_score = SequenceMatcher(None, l_n, c_n).ratio()
                                         if name_score >= 0.75:
                                             addr_score = SequenceMatcher(None, l_a, c_a).ratio() if (l_a and c_a) else 0.0
+                                            area_match = (l_area == c_area) if (l_area and c_area) else False
                                             addr_contains = (l_a in c_a or c_a in l_a) if len(l_a) > 4 and len(c_a) > 4 else False
 
-                                            if addr_score >= 0.50 or addr_contains or not l_a:
+                                            if addr_score >= 0.50 or area_match or addr_contains:
                                                 if prio > highest_prio:
                                                     highest_prio = prio
                                                     best_candidate = (c_n_raw, c_g, c_st)
-                                                    if prio == 4:  # 已達最高優先級即可跳出
+                                                    if prio == 4:
                                                         break
 
                                     if best_candidate:
@@ -263,14 +305,20 @@ with tab2:
 
             name_col = find_column(df_url, ["company / account", "company", "account", "account name", "name", "title"])
             street_col = find_column(df_url, ["street", "address", "地址"])
+            city_col = find_column(df_url, ["city", "縣市", "市"])
+            area_col = find_column(df_url, ["area", "district", "鄉鎮市區", "區"])
 
             if not name_col:
                 st.error("❌ 找不到店家名稱欄位 (Company / Account Name)")
             else:
                 def make_url(r):
                     c_name = str(r[name_col]).strip() if pd.notna(r[name_col]) else ""
+                    c_city = str(r[city_col]).strip() if city_col and pd.notna(r[city_col]) else ""
+                    c_area = str(r[area_col]).strip() if area_col and pd.notna(r[area_col]) else ""
                     c_addr = str(r[street_col]).strip() if street_col and pd.notna(r[street_col]) else ""
-                    return f"https://www.google.com/maps/search/{quote(f'{c_name} {c_addr}'.strip())}"
+                    
+                    full_query = f"{c_name} {c_city}{c_area}{c_addr}".strip()
+                    return f"https://www.google.com/maps/search/{quote(full_query)}"
 
                 df_url["url"] = df_url.apply(make_url, axis=1)
                 
@@ -354,7 +402,7 @@ with tab3:
 # ── TAB 4: Step 3 · Classify Leads & Filter ───────────────────────
 with tab4:
     st.subheader("📊 Step 3 · 全 Google 地圖類別動態過濾與 CRM 比對")
-    st.caption("透過 GRID 進行 100% 精準對接，自動排除 WTG 與歇業，按 Status 優先級帶出 Salesforce GRID & Status。")
+    st.caption("透過 GRID 進行 100% 精準對接，自動排除 WTG 與歇業，並進行縣市/行政區雙重核對。")
 
     c1, c2, c3 = st.columns(3)
     with c1:
@@ -397,13 +445,17 @@ with tab4:
                 try:
                     l_name_col = find_column(df_leads, ["company / account", "company", "account", "name", "title"])
                     l_addr_col = find_column(df_leads, ["street", "address", "地址"])
+                    l_city_col = find_column(df_leads, ["city", "縣市", "市"])
+                    l_area_col = find_column(df_leads, ["area", "district", "鄉鎮市區", "區"])
 
                     a_grid_col = find_column(df_apify, ["grid"])
                     a_name_col = find_column(df_apify, ["title", "name", "searchstring"])
                     a_status_col = find_column(df_apify, ["permanentlyclosed", "temporarilyclosed", "isclosed", "status"])
 
                     c_name_col = find_column(df_crm, ["account name", "company", "account", "name", "title"])
-                    c_addr_col = find_column(df_crm, ["street", "address", "地址"])
+                    c_addr_col = find_column(df_crm, ["formatted_restaurant_address__c", "street", "address", "地址"])
+                    c_city_col = find_column(df_crm, ["city", "縣市"])
+                    c_area_col = find_column(df_crm, ["area", "district", "鄉鎮區"])
                     c_grid_col = find_column(df_crm, ["grid", "sf_id", "salesforce id", "account id"])
                     c_status_col = find_column(df_crm, ["status", "account_status", "stage"])
 
@@ -412,6 +464,8 @@ with tab4:
 
                     c_names_raw = df_crm[c_name_col].fillna("").astype(str).tolist() if c_name_col else []
                     c_addrs_raw = df_crm[c_addr_col].fillna("").astype(str).tolist() if c_addr_col else [""]*len(c_names_raw)
+                    c_cities_raw = df_crm[c_city_col].fillna("").astype(str).tolist() if c_city_col else [""]*len(c_names_raw)
+                    c_areas_raw = df_crm[c_area_col].fillna("").astype(str).tolist() if c_area_col else [""]*len(c_names_raw)
                     c_grids_raw = df_crm[c_grid_col].fillna("").astype(str).tolist() if c_grid_col else [""]*len(c_names_raw)
                     c_statuses_raw = df_crm[c_status_col].fillna("").astype(str).tolist() if c_status_col else [""]*len(c_names_raw)
 
@@ -428,9 +482,12 @@ with tab4:
                         if prio == 0:
                             continue
 
-                        rec = (c_n_raw, clean_text(c_addrs_raw[idx]), c_grids_raw[idx], c_st_raw, prio)
-                        if c_n not in exact_crm_dict or prio > exact_crm_dict[c_n][4]:
-                            exact_crm_dict[c_n] = rec
+                        c_city, c_area = extract_city_and_area(c_addrs_raw[idx], c_cities_raw[idx], c_areas_raw[idx])
+                        rec = (c_n_raw, clean_text(c_addrs_raw[idx]), c_city, c_area, c_grids_raw[idx], c_st_raw, prio)
+
+                        exact_key = f"{c_n}_{c_city}"
+                        if exact_key not in exact_crm_dict or prio > exact_crm_dict[exact_key][6]:
+                            exact_crm_dict[exact_key] = rec
 
                         prefix = c_n[:2]
                         if prefix not in prefix_crm_dict:
@@ -465,6 +522,11 @@ with tab4:
                     google_cats = []
                     debug_reasons = []
 
+                    l_names_raw = df_leads[l_name_col].fillna("").astype(str).tolist()
+                    l_addrs_raw = df_leads[l_addr_col].fillna("").astype(str).tolist() if l_addr_col else [""]*len(l_names_raw)
+                    l_cities_raw = df_leads[l_city_col].fillna("").astype(str).tolist() if l_city_col else [""]*len(l_names_raw)
+                    l_areas_raw = df_leads[l_area_col].fillna("").astype(str).tolist() if l_area_col else [""]*len(l_names_raw)
+
                     for idx, l_row in df_leads.iterrows():
                         l_name_raw = str(l_row[l_name_col]).strip() if l_name_col and pd.notna(l_row[l_name_col]) else ""
                         l_addr_raw = str(l_row[l_addr_col]).strip() if l_addr_col and pd.notna(l_row[l_addr_col]) else ""
@@ -472,6 +534,7 @@ with tab4:
 
                         l_name = clean_text(l_name_raw)
                         l_addr = clean_text(l_addr_raw)
+                        l_city, l_area = extract_city_and_area(l_addr_raw, l_cities_raw[idx], l_areas_raw[idx])
 
                         # 1. 硬過濾公司/B2B/非目標店名關鍵字
                         hit_keyword = next((nk for nk in NON_FOOD_NAME_KEYWORDS if nk.lower() in l_name), None)
@@ -514,7 +577,7 @@ with tab4:
                             debug_reasons.append(f"Google 類別屬於選定的 WTG [{cat_str}]")
                             continue
 
-                        # 5. CRM 重複比對
+                        # 5. CRM 重複比對 (具備行政區硬校驗)
                         best_status = "P1 - New Lead"
                         best_crm_name = ""
                         best_sf_grid = ""
@@ -522,27 +585,35 @@ with tab4:
                         debug_msg = f"驗證通過 (Google類別: {cat_str or '未對應到，店名正常'})"
 
                         if l_name:
-                            if l_name in exact_crm_dict:
-                                c_n_raw, c_a, c_g, c_st, _ = exact_crm_dict[l_name]
-                                best_status = "P4 - Duplicate"
-                                best_crm_name = c_n_raw
-                                best_sf_grid = c_g
-                                best_sf_status = c_st
-                                debug_msg = f"命中 CRM 重複 ({c_n_raw})"
-                            else:
+                            exact_key = f"{l_name}_{l_city}"
+                            if exact_key in exact_crm_dict:
+                                c_n_raw, c_a, c_city, c_area, c_g, c_st, _ = exact_crm_dict[exact_key]
+                                if not l_area or not c_area or l_area == c_area or l_area in c_a or c_area in l_a:
+                                    best_status = "P4 - Duplicate"
+                                    best_crm_name = c_n_raw
+                                    best_sf_grid = c_g
+                                    best_sf_status = c_st
+                                    debug_msg = f"命中 CRM 重複 ({c_n_raw})"
+
+                            if best_status != "P4 - Duplicate":
                                 prefix = l_name[:2]
                                 candidates = prefix_crm_dict.get(prefix, [])
                                 best_candidate = None
                                 highest_prio = -1
 
-                                for c_n_raw, c_a, c_g, c_st, prio in candidates:
+                                for c_n_raw, c_a, c_city, c_area, c_g, c_st, prio in candidates:
                                     c_n = clean_text(c_n_raw)
+
+                                    if l_city and c_city and l_city != c_city:
+                                        continue
+
                                     name_score = SequenceMatcher(None, l_name, c_n).ratio()
                                     if name_score >= 0.75:
-                                        addr_score = SequenceMatcher(None, l_addr, c_a).ratio() if (l_addr and c_a) else 0.0
-                                        addr_contains = (l_addr in c_a or c_a in l_addr) if len(l_addr) > 4 and len(c_a) > 4 else False
+                                        addr_score = SequenceMatcher(None, l_a, c_a).ratio() if (l_a and c_a) else 0.0
+                                        area_match = (l_area == c_area) if (l_area and c_area) else False
+                                        addr_contains = (l_a in c_a or c_a in l_a) if len(l_a) > 4 and len(c_a) > 4 else False
 
-                                        if addr_score >= 0.50 or addr_contains:
+                                        if addr_score >= 0.50 or area_match or addr_contains:
                                             if prio > highest_prio:
                                                 highest_prio = prio
                                                 best_candidate = (c_n_raw, c_g, c_st)
@@ -702,7 +773,7 @@ with tab6:
                 st.dataframe(df_sampled.head(20))
 
                 sample_csv_out = df_sampled.to_csv(index=False).encode('utf-8-sig')
-                st.download_button("📥 下載 KPI 抽樣結果 (CSV)", data=sample_csv_out, file_name=f"kpi_sample_{len(df_sampled)}_rows.csv", mime="text/csv")
+                st.download_button("📥 下載 KPI 抽樣結果 (CSV)", data=csv_out, file_name=f"kpi_sample_{len(df_sampled)}_rows.csv", mime="text/csv")
         except Exception as e:
             st.error(f"抽樣過程發生錯誤: {str(e)}")
 
@@ -718,6 +789,7 @@ with tab7:
 
     * **情境 1：只做 CRM 重複排重 (最快速，不用 Apify)**
       * 開啟 **`⚡ SF 快速排重 (免 Apify)`** 頁籤，直接上傳 Raw Leads 與 CRM 大檔，1 秒極速完成比對。
+      * 自動具備 **「縣市與行政區硬校驗」**，徹底杜絕跨縣市對錯問題。
       * 自動按 Status 優先級比對 (Active/Onboarding/Menu Processing/Quality Check > Collecting Documents > New/Negotiation > Lost)，並帶出其 Salesforce Status，自動跳過 `Terminated` / `Win Back failed` 帳號。
     * **情境 2：完整 3 步驟審核 (含 Google 地圖類別與歇業判讀)**
       * 依照 `Step 1` $\rightarrow$ `Step 2` $\rightarrow$ `Step 3` 順序操作。
